@@ -209,30 +209,36 @@ def _norm(s):
     s = unicodedata.normalize("NFKC", s).lower().translate(_LEET)
     return re.sub(r"[^a-z0-9]", "", s)
 
+# Keyword đầy đủ -> khớp trên BLOB (đã bỏ dấu/khoảng trắng) => bắt né tránh 'T.i.k.T.o.k', 'l a z a d a'.
 BANNED = {
     "tiktok": "tiktok", "tiktokshop": "tiktok", "douyin": "tiktok",
-    "lazada": "competitor", "tiki": "competitor", "sendo": "competitor", "taobao": "competitor",
-    "temu": "competitor", "aliexpress": "competitor", "1688": "competitor", "shein": "competitor",
+    # Nền tảng MXH + sàn đối thủ. (Brand sản phẩm/hàng hóa KHÔNG liệt kê -> chấp nhận.)
     "facebook": "competitor", "instagram": "competitor", "youtube": "competitor",
     "telegram": "competitor", "zalo": "competitor", "wechat": "competitor", "kuaishou": "competitor",
+    "lazada": "competitor", "tiki": "competitor", "sendo": "competitor", "taobao": "competitor",
+    "temu": "competitor", "aliexpress": "competitor", "shein": "competitor",
 }
-_BANNED_NORM = {kn: v for k, v in BANNED.items() if (kn := _norm(k)) and len(kn) >= 4}
+_BANNED_NORM = {kn: v for k, v in BANNED.items() if (kn := _norm(k))}
+# Mảnh 'tik'/'tok' -> khớp theo TỪ RỜI (cả từ), tránh oan 'batik'/'tokyo' nhưng vẫn bắt 'Tik Tok'/'Tik'.
+_FRAG_WORDS = {"tik": "tiktok", "tok": "tiktok"}
 _RAW_KEYWORDS = {"抖音": "tiktok"}   # 抖音
-_URL_RE = re.compile(r"(https?://|www\.|\.com|\.vn\b|@[a-z0-9_.]{3,})", re.I)
 
 def text_violations(texts):
+    """Khớp keyword đối thủ trên chữ OCR. Không còn nhánh url/@handle."""
     hits = {}
     raw = " ".join(t for t, _ in texts)
-    blob = _norm(raw)
+    blob = _norm(raw)                                          # gộp liền, chống né tránh
+    norm_raw = unicodedata.normalize("NFKC", raw).lower().translate(_LEET)
+    words = set(re.findall(r"[a-z0-9]+", norm_raw))            # các "từ" rời
     for kn, label in _BANNED_NORM.items():
         if kn in blob:
             hits.setdefault(label, []).append(kn)
+    for w, label in _FRAG_WORDS.items():
+        if w in words:
+            hits.setdefault(label, []).append(w)
     for kw, label in _RAW_KEYWORDS.items():
         if kw in raw:
             hits.setdefault(label, []).append(kw)
-    for t, _ in texts:
-        if _URL_RE.search(t):
-            hits.setdefault("url", []).append(t.strip())
     return hits
 
 
