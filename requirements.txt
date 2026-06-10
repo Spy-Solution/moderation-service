@@ -1,0 +1,11 @@
+# Shopee image moderation (CPU). Cài torch CPU riêng:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+transformers>=4.50.0
+accelerate
+pillow<12
+numpy
+requests
+pyzbar                  # QR/barcode (Windows kèm DLL; Linux: apt-get install -y libzbar0)
+opencv-contrib-python   # cv2 base + WeChat QR (KHÔNG cài chung opencv-python)
+rapidocr                # OCR qua ONNXRuntime
+onnxruntime
