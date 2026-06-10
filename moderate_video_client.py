@@ -7,9 +7,14 @@
 Logic: lấy 1 frame mỗi --every-sec (dùng grab() bỏ qua frame thừa cho nhẹ CPU),
 gửi từng frame tới /moderate; gặp frame REJECT đầu tiên -> kết luận video REJECT (kèm mốc giây).
 """
-import argparse, time
+import argparse, sys, time
 import cv2
 import requests
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")     # tránh lỗi cp1252 khi in tiếng Việt trên Windows
+except Exception:
+    pass
 
 
 def moderate_video(video, api, every_sec, max_frames, nsfw_thr, verbose=True):
