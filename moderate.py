@@ -27,7 +27,21 @@ wechat_detector = None # cv2 WeChat QR (optional)
 import cv2  # opencv-contrib-python (cv2 base + wechat_qrcode)
 
 
-def load_engines(quiet: bool = False):
+def _make_ocr_gpu(RapidOCR):
+    """Thử bật CUDA EP cho RapidOCR qua vài kiểu param (khác nhau theo version)."""
+    for params in ({"EngineConfig.onnxruntime.use_cuda": True},
+                   {"Global.use_cuda": True}):
+        try:
+            return RapidOCR(params=params)
+        except Exception:
+            pass
+    try:
+        return RapidOCR(det_use_cuda=True, cls_use_cuda=True, rec_use_cuda=True)  # API cũ
+    except Exception:
+        return None
+
+
+def load_engines(use_gpu: bool = False, quiet: bool = False):
     global nsfw_clf, ocr_engine, _OCR_NEW, wechat_detector
 
     def log(*a):
@@ -43,16 +57,22 @@ def load_engines(quiet: bool = False):
         ip = AutoImageProcessor.from_pretrained(mid)
     except Exception:
         ip = ViTImageProcessor.from_pretrained(mid)          # repo thiếu image_processor_type
-    nsfw_clf = pipeline("image-classification", model=mdl, image_processor=ip, device=-1)
-    log("[ok] NSFW:", mid)
+    nsfw_clf = pipeline("image-classification", model=mdl, image_processor=ip,
+                        device=0 if use_gpu else -1)
+    log("[ok] NSFW:", mid, "| device:", "cuda:0" if use_gpu else "cpu")
 
     # --- OCR (RapidOCR / ONNXRuntime) ---
     try:
         from rapidocr import RapidOCR; _OCR_NEW = True
     except ImportError:
         from rapidocr_onnxruntime import RapidOCR; _OCR_NEW = False
-    ocr_engine = RapidOCR()
-    log("[ok] OCR: RapidOCR", "(new)" if _OCR_NEW else "(old)")
+    ocr_engine = (_make_ocr_gpu(RapidOCR) if use_gpu else None) or RapidOCR()
+    try:
+        import onnxruntime as ort
+        log("[ok] OCR: RapidOCR", "(new)" if _OCR_NEW else "(old)",
+            "| ORT providers:", ort.get_available_providers())
+    except Exception:
+        log("[ok] OCR: RapidOCR", "(new)" if _OCR_NEW else "(old)")
 
     # --- WeChat QR (optional) ---
     try:
@@ -241,6 +261,8 @@ def _collect(path):
 def main():
     ap = argparse.ArgumentParser(description="Shopee image moderation (QR/NSFW/OCR)")
     ap.add_argument("path", help="ảnh hoặc folder ảnh")
+    ap.add_argument("--device", choices=["auto", "cpu", "gpu"], default="auto",
+                    help="auto: dùng GPU nếu có (mặc định)")
     ap.add_argument("--workers", type=int, default=1, help="số thread chạy song song")
     ap.add_argument("--nsfw-thr", type=float, default=0.5)
     ap.add_argument("--csv", help="ghi kết quả ra file CSV")
@@ -250,13 +272,28 @@ def main():
     if not paths:
         print("Không tìm thấy ảnh ở:", args.path); return
 
-    print(f"Loading engines... ({len(paths)} ảnh, {os.cpu_count()} CPU)")
-    load_engines()
-
+    # Quyết định CPU/GPU
+    cuda_ok = False
     try:
-        import torch; torch.set_num_threads(1)               # để N worker không tranh hết core
+        import torch
+        cuda_ok = torch.cuda.is_available()
+        if cuda_ok:
+            print("GPU:", torch.cuda.get_device_name(0))
     except Exception:
         pass
+    use_gpu = args.device == "gpu" or (args.device == "auto" and cuda_ok)
+    if args.device == "gpu" and not cuda_ok:
+        print("[warn] --device gpu nhưng torch không thấy CUDA -> chạy CPU")
+        use_gpu = False
+
+    print(f"Loading engines... ({len(paths)} ảnh, device={'gpu' if use_gpu else 'cpu'})")
+    load_engines(use_gpu=use_gpu)
+
+    if not use_gpu:
+        try:
+            import torch; torch.set_num_threads(1)           # CPU: để N worker không tranh hết core
+        except Exception:
+            pass
 
     def work(p):
         try:
@@ -281,7 +318,8 @@ def main():
         name = os.path.basename(p)
         print(f"{verdict:7} {name:48} {viol}")
 
-    print(f"\n{len(paths)} ảnh / {dt:.1f}s ({dt/len(paths):.2f}s/ảnh, workers={args.workers}) "
+    print(f"\n{len(paths)} ảnh / {dt:.1f}s ({dt/len(paths):.2f}s/ảnh, "
+          f"device={'gpu' if use_gpu else 'cpu'}, workers={args.workers}) "
           f"| REJECT={rej} ACCEPT={len(paths)-rej}")
 
     if args.csv:
