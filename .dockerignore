@@ -1,0 +1,10 @@
+.venv/
+.hf_cache/
+.paddle_cache/
+.models/
+sample/
+notebooks/
+*.csv
+.git/
+__pycache__/
+*.pyc

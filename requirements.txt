@@ -8,4 +8,9 @@ requests
 pyzbar                  # QR/barcode (Windows kèm DLL; Linux: apt-get install -y libzbar0)
 opencv-contrib-python   # cv2 base + WeChat QR (KHÔNG cài chung opencv-python)
 rapidocr                # OCR qua ONNXRuntime
-onnxruntime
+onnxruntime             # GPU: thay bằng onnxruntime-gpu (xem requirements-gpu.txt)
+
+# API service
+fastapi
+uvicorn[standard]
+python-multipart        # nhận file upload
