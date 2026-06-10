@@ -1,0 +1,5 @@
+# Ép LF cho file chạy trên Linux (tránh CRLF làm vỡ bash/docker khi deploy).
+*.sh        text eol=lf
+*.py        text eol=lf
+Dockerfile  text eol=lf
+*.md        text eol=lf
