@@ -167,8 +167,11 @@ def detect_codes(img):
 UNSAFE_LABELS = {"porn", "hentai", "sexy"}
 ALL_LABELS = ["neutral", "drawings", "sexy", "porn", "hentai"]
 
+def nsfw_breakdown(img):
+    return {p["label"].lower(): float(p["score"]) for p in nsfw_clf(img)}
+
 def nsfw_score(img):
-    nb = {p["label"].lower(): float(p["score"]) for p in nsfw_clf(img)}
+    nb = nsfw_breakdown(img)
     return sum(nb.get(k, 0.0) for k in UNSAFE_LABELS)
 
 
@@ -268,6 +271,8 @@ def main():
                     help="auto: dùng GPU nếu có (mặc định)")
     ap.add_argument("--workers", type=int, default=1, help="số thread chạy song song")
     ap.add_argument("--nsfw-thr", type=float, default=0.5)
+    ap.add_argument("--nsfw-debug", action="store_true",
+                    help="in điểm thô 5 lớp NSFW cho MỌI ảnh (để dò ngưỡng)")
     ap.add_argument("--csv", help="ghi kết quả ra file CSV")
     args = ap.parse_args()
 
@@ -300,10 +305,17 @@ def main():
 
     def work(p):
         try:
-            r = moderate(p, args.nsfw_thr)
-            return p, r["verdict"], r["violations"], r["nsfw"]
+            img = load_image(p)
+            row = {"file": os.path.basename(p)}
+            if args.nsfw_debug:                              # điểm 5 lớp cho MỌI ảnh
+                nb = nsfw_breakdown(img)
+                row.update({k: round(nb.get(k, 0.0), 3) for k in ALL_LABELS})
+            r = moderate(img, args.nsfw_thr)
+            row.update(verdict=r["verdict"], violations=r["violations"], nsfw=r["nsfw"])
+            return row
         except Exception as e:
-            return p, "ERROR", f"{type(e).__name__}: {e}", None
+            return {"file": os.path.basename(p), "verdict": "ERROR",
+                    "violations": f"{type(e).__name__}: {e}", "nsfw": None}
 
     t0 = time.time()
     if args.workers > 1:
@@ -315,22 +327,23 @@ def main():
     dt = time.time() - t0
 
     rej = 0
-    for p, verdict, viol, nsfw in results:
-        if verdict == "REJECT":
+    for row in results:
+        if row["verdict"] == "REJECT":
             rej += 1
-        name = os.path.basename(p)
-        print(f"{verdict:7} {name:48} {viol}")
+        line = f"{row['verdict']:7} {row['file']:48} {row['violations']}"
+        if args.nsfw_debug and "sexy" in row:
+            line += "   " + " ".join(f"{k[:3]}={row[k]}" for k in ALL_LABELS)
+        print(line)
 
     print(f"\n{len(paths)} ảnh / {dt:.1f}s ({dt/len(paths):.2f}s/ảnh, "
           f"device={'gpu' if use_gpu else 'cpu'}, workers={args.workers}) "
           f"| REJECT={rej} ACCEPT={len(paths)-rej}")
 
     if args.csv:
+        cols = ["file", "verdict", "violations", "nsfw"] + (ALL_LABELS if args.nsfw_debug else [])
         with open(args.csv, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["file", "verdict", "violations", "nsfw"])
-            for p, verdict, viol, nsfw in results:
-                w.writerow([os.path.basename(p), verdict, viol, nsfw])
+            w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            w.writeheader(); w.writerows(results)
         print("CSV:", args.csv)
 
 
