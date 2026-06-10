@@ -116,14 +116,16 @@ _ZSYM_NAMES = ["QRCODE", "EAN13", "EAN8", "UPCA", "UPCE",
                "CODE128", "CODE39", "CODE93", "I25", "CODABAR"]
 _ZSYMS = [getattr(ZBarSymbol, n) for n in _ZSYM_NAMES if hasattr(ZBarSymbol, n)]
 
+import threading
 CODE_SCALES = (1.0, 1.5, 2.0, 3.0)
-_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-_SHARPEN = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-_qr_cv = cv2.QRCodeDetector()
+_SHARPEN = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])     # hằng số read-only -> share an toàn
+_WECHAT_LOCK = threading.Lock()                                # WeChat detector không thread-safe
 
 def _gray_variants(gray):
+    # Tạo CLAHE per-call: object cv2 có state nội bộ, share giữa thread -> C++ exception.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     yield gray
-    yield _CLAHE.apply(gray)
+    yield clahe.apply(gray)
     yield cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     yield cv2.filter2D(gray, -1, _SHARPEN)
 
@@ -140,7 +142,7 @@ def detect_codes(img):
     if not found:
         bgr = np.array(base)[:, :, ::-1].copy()
         try:
-            ok, infos, _pts, _ = _qr_cv.detectAndDecodeMulti(bgr)
+            ok, infos, _pts, _ = cv2.QRCodeDetector().detectAndDecodeMulti(bgr)  # per-call -> thread-safe
             if ok:
                 for t in infos:
                     if t:
@@ -149,7 +151,8 @@ def detect_codes(img):
             pass
     if not found and wechat_detector is not None:
         try:
-            texts, _ = wechat_detector.detectAndDecode(np.array(base)[:, :, ::-1].copy())
+            with _WECHAT_LOCK:                                    # detector dùng chung -> khoá khi gọi
+                texts, _ = wechat_detector.detectAndDecode(np.array(base)[:, :, ::-1].copy())
             for t in texts:
                 if t:
                     found[("QRCODE", t.encode())] = None
