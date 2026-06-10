@@ -91,9 +91,10 @@ def load_image(src):
 from pyzbar.pyzbar import decode as zbar_decode, ZBarSymbol
 
 # Chỉ giải QR + barcode bán lẻ phổ biến. Bỏ PDF417/DATABAR (decoder libzbar hay assert -> spam
-# warning + chậm, mà ta không cần mã loại đó).
-_ZSYMS = [ZBarSymbol.QRCODE, ZBarSymbol.EAN13, ZBarSymbol.EAN8, ZBarSymbol.UPCA, ZBarSymbol.UPCE,
-          ZBarSymbol.CODE128, ZBarSymbol.CODE39, ZBarSymbol.CODE93, ZBarSymbol.ITF, ZBarSymbol.CODABAR]
+# warning + chậm, mà ta không cần). Lọc theo tên có thật để khỏi vỡ giữa các version pyzbar.
+_ZSYM_NAMES = ["QRCODE", "EAN13", "EAN8", "UPCA", "UPCE",
+               "CODE128", "CODE39", "CODE93", "I25", "CODABAR"]
+_ZSYMS = [getattr(ZBarSymbol, n) for n in _ZSYM_NAMES if hasattr(ZBarSymbol, n)]
 
 CODE_SCALES = (1.0, 1.5, 2.0, 3.0)
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
