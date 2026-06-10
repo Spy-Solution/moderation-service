@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Test images (sensitive) - copy to server separately
+sample/
+
+# Local venv & model cache (keep off C:)
+.venv/
+.hf_cache/
