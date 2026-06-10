@@ -57,8 +57,10 @@ def load_engines(use_gpu: bool = False, quiet: bool = False):
         ip = AutoImageProcessor.from_pretrained(mid)
     except Exception:
         ip = ViTImageProcessor.from_pretrained(mid)          # repo thiếu image_processor_type
+    # function_to_apply="softmax": ép chuẩn hoá softmax để điểm nhất quán giữa các version
+    # transformers (4.46 server vs 5.x local đôi khi mặc định sigmoid -> điểm lệch thang).
     nsfw_clf = pipeline("image-classification", model=mdl, image_processor=ip,
-                        device=0 if use_gpu else -1)
+                        device=0 if use_gpu else -1, function_to_apply="softmax")
     log("[ok] NSFW:", mid, "| device:", "cuda:0" if use_gpu else "cpu")
 
     # --- OCR (RapidOCR / ONNXRuntime) ---
