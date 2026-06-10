@@ -3,7 +3,9 @@
 set -e
 sudo apt-get update && sudo apt-get install -y libzbar0 libgl1 libglib2.0-0
 
-pip install "transformers>=4.50.0" accelerate "pillow<12" numpy requests \
+# transformers PIN <4.49: bản >=4.50 cần torch>=2.7 (torch.float8_e8m0fnu), mà torch khớp
+# driver CUDA 12.4 tối đa là 2.6 (kênh cu124). NSFW ViT không cần transformers mới.
+pip install "transformers==4.46.3" accelerate "pillow<12" numpy requests \
     pyzbar opencv-contrib-python rapidocr onnxruntime-gpu \
     fastapi "uvicorn[standard]" python-multipart
 

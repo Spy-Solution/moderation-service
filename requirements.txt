@@ -1,6 +1,6 @@
 # Shopee image moderation (CPU). Cài torch CPU riêng:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
-transformers>=4.50.0
+transformers==4.46.3    # PIN: >=4.50 cần torch>=2.7; torch khớp CUDA 12.4 tối đa 2.6
 accelerate
 pillow<12
 numpy
