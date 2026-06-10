@@ -37,7 +37,7 @@ DISCORD_CHANNEL = os.environ["DISCORD_CHANNEL"]
 API_URL = os.environ.get("MODERATION_API_URL", "http://91.150.160.38:16815")
 
 POSITIONS = [0.1, 0.25, 0.5, 0.75, 0.9]
-QUERY = "SELECT * FROM public.draft_source WHERE status = 'ready' ORDER BY id ASC"
+QUERY = "SELECT * FROM public.draft_source WHERE status = 'done' ORDER BY id ASC"
 
 
 def frames_at(url):
@@ -63,7 +63,7 @@ def frames_at(url):
 
 def moderate_frame(frame):
     ok, buf = cv2.imencode(".jpg", frame)
-    r = requests.post(f"{API_URL}/moderate",
+    r = requests.post(f"{API_URL}/moderate?nsfw_thr=0.7",
                       files={"file": ("frame.jpg", buf.tobytes(), "image/jpeg")}, timeout=60)
     r.raise_for_status()
     return r.json()
@@ -83,7 +83,7 @@ def check_video(url):
             return {"verdict": "ERROR", "reason": f"API: {type(e).__name__}: {e}"}
         if d.get("verdict") == "REJECT":
             return {"verdict": "REJECT", "at": frac, "violations": d.get("violations"),
-                    "frames_checked": len(frames)}
+                    "nsfw": d.get("nsfw"), "frames_checked": len(frames)}
     return {"verdict": "ACCEPT", "frames_checked": len(frames)}
 
 
@@ -106,16 +106,18 @@ def process_one(row, url_i, id_i, dry_run):
     res = check_video(url)
     v = res["verdict"]
     at = f"{res['at']*100:.0f}%" if v == "REJECT" else ""
+    nsfw = res.get("nsfw") if v == "REJECT" else None
+    nsfw_str = f" (nsfw={nsfw:.2f})" if isinstance(nsfw, (int, float)) else ""
     with _print_lock:
         if v == "REJECT":
-            print(f"id={vid} REJECT  {res['violations']} @ {at}")
+            print(f"id={vid} REJECT  {res['violations']}{nsfw_str} @ {at}")
         elif v == "ERROR":
             print(f"id={vid} ERROR   {res['reason']}")
         else:
             print(f"id={vid} ACCEPT")
     if v == "REJECT" and not dry_run:
         discord_warn(f"⚠️ **Video vi phạm** (id=`{vid}`)\n"
-                     f"Lý do: **{res['violations']}** tại ~{at} thời lượng\n{url}")
+                     f"Lý do: **{res['violations']}**{nsfw_str} tại ~{at} thời lượng\n{url}")
     return v
 
 
