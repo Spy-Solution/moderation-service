@@ -15,12 +15,15 @@ Chạy:
     python check_draft_sources.py --dry-run       # không gửi Discord, chỉ in
     python check_draft_sources.py --limit 5       # chỉ 5 video đầu (test)
 """
-import argparse, os, sys, time
+import argparse, os, sys, time, threading
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
+
+_print_lock = threading.Lock()
 
 import cv2
 import requests
@@ -93,10 +96,34 @@ def discord_warn(content):
     return r.status_code
 
 
+def process_one(row, url_i, id_i, dry_run):
+    """Xử lý 1 video: kiểm duyệt + in + (nếu REJECT) gửi Discord. Trả về verdict."""
+    vid, url = row[id_i], row[url_i]
+    if not url:
+        with _print_lock:
+            print(f"id={vid} [skip] url rỗng")
+        return "SKIP"
+    res = check_video(url)
+    v = res["verdict"]
+    at = f"{res['at']*100:.0f}%" if v == "REJECT" else ""
+    with _print_lock:
+        if v == "REJECT":
+            print(f"id={vid} REJECT  {res['violations']} @ {at}")
+        elif v == "ERROR":
+            print(f"id={vid} ERROR   {res['reason']}")
+        else:
+            print(f"id={vid} ACCEPT")
+    if v == "REJECT" and not dry_run:
+        discord_warn(f"⚠️ **Video vi phạm** (id=`{vid}`)\n"
+                     f"Lý do: **{res['violations']}** tại ~{at} thời lượng\n{url}")
+    return v
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="không gửi Discord, chỉ in")
     ap.add_argument("--limit", type=int, help="chỉ xử lý N video đầu")
+    ap.add_argument("--workers", type=int, default=8, help="số video xử lý song song")
     args = ap.parse_args()
 
     # health check API
@@ -114,29 +141,12 @@ def main():
     url_i, id_i = cols.index("url"), (cols.index("id") if "id" in cols else 0)
     rows = cur.fetchall()
     cur.close(); conn.close()
-    print(f"{len(rows)} video status='ready'\n")
+    print(f"{len(rows)} video status='ready' | workers={args.workers}\n")
 
-    rej = err = 0
     t0 = time.time()
-    for row in rows:
-        vid, url = row[id_i], row[url_i]
-        if not url:
-            print(f"id={vid} [skip] url rỗng"); continue
-        res = check_video(url)
-        v = res["verdict"]
-        if v == "REJECT":
-            rej += 1
-            at = f"{res['at']*100:.0f}%"
-            msg = (f"⚠️ **Video vi phạm** (id=`{vid}`)\n"
-                   f"Lý do: **{res['violations']}** tại ~{at} thời lượng\n{url}")
-            print(f"id={vid} REJECT  {res['violations']} @ {at}")
-            if not args.dry_run:
-                discord_warn(msg)
-        elif v == "ERROR":
-            err += 1
-            print(f"id={vid} ERROR   {res['reason']}")
-        else:
-            print(f"id={vid} ACCEPT")
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        verdicts = list(ex.map(lambda r: process_one(r, url_i, id_i, args.dry_run), rows))
+    rej = verdicts.count("REJECT"); err = verdicts.count("ERROR")
 
     print(f"\nXong {len(rows)} video / {time.time()-t0:.1f}s "
           f"| REJECT={rej} ACCEPT={len(rows)-rej-err} ERROR={err}"
