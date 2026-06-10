@@ -14,3 +14,7 @@ onnxruntime             # GPU: thay bằng onnxruntime-gpu (xem requirements-gpu
 fastapi
 uvicorn[standard]
 python-multipart        # nhận file upload
+
+# Batch job quét DB + cảnh báo Discord (check_draft_sources.py)
+psycopg2-binary
+python-dotenv
