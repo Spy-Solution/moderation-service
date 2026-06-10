@@ -223,3 +223,6 @@ sample/
 # Local venv & model cache (keep off C:)
 .venv/
 .hf_cache/
+
+# WeChat QR model files
+.models/
