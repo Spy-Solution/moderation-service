@@ -19,13 +19,10 @@ WORKDIR /app
 # để tránh 2 bản cv2 đụng nhau.
 RUN pip install --no-cache-dir \
         "transformers==4.46.3" accelerate "pillow<12" numpy requests \
-        pyzbar rapidocr onnxruntime-gpu ultralytics \
+        pyzbar rapidocr onnxruntime-gpu \
         fastapi "uvicorn[standard]" python-multipart \
     && pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true \
     && pip install --no-cache-dir opencv-contrib-python
-
-# Tải sẵn YOLOv8n vào image (khỏi tải lúc khởi động container).
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 COPY moderate.py app.py ./
 
