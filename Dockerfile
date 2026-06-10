@@ -15,10 +15,14 @@ WORKDIR /app
 
 # Python deps (torch/cuda/cudnn đã có trong base: torch 2.5.1 / CUDA 12.4).
 # transformers PIN <4.49: bản mới cần torch>=2.7 (float8_e8m0fnu) -> vỡ với torch 2.5/2.6.
+# rapidocr kéo opencv-python về -> gỡ rồi cài opencv-contrib-python (superset, có WeChat QR)
+# để tránh 2 bản cv2 đụng nhau.
 RUN pip install --no-cache-dir \
         "transformers==4.46.3" accelerate "pillow<12" numpy requests \
-        pyzbar opencv-contrib-python rapidocr onnxruntime-gpu \
-        fastapi "uvicorn[standard]" python-multipart
+        pyzbar rapidocr onnxruntime-gpu \
+        fastapi "uvicorn[standard]" python-multipart \
+    && pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true \
+    && pip install --no-cache-dir opencv-contrib-python
 
 COPY moderate.py app.py ./
 

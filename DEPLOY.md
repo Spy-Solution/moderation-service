@@ -2,18 +2,22 @@
 
 API: `POST /moderate` (upload ảnh) hoặc `POST /moderate_url` ({"url": ...}) → `{verdict, violations, nsfw}`.
 
-## Cách A — Docker (khuyến nghị, tái lập được)
+## Cách A — Docker image build trên GitHub Actions (không cần Docker ở máy)
 
-**1. Build + push image** (máy local có Docker):
-```bash
-docker build -t <dockerhub_user>/moderation:gpu .
-docker push <dockerhub_user>/moderation:gpu
-```
+Workflow `.github/workflows/build-docker.yml` build + push image lên GHCR.
 
-**2. Tạo instance trên Vast.ai:**
-- Image: `<dockerhub_user>/moderation:gpu`
+**1. Chạy build:**
+- Tự chạy khi push thay đổi `Dockerfile`/`app.py`/`moderate.py`, HOẶC vào tab **Actions** → **build-docker** → **Run workflow**.
+- Xong: image ở `ghcr.io/spy-solution/moderation-service:latest`.
+
+**2. Cho phép Vast.ai pull (1 lần):** GitHub → repo → **Packages** → `moderation-service` → **Package settings** → **Change visibility → Public**. (Hoặc để private rồi đưa credentials cho Vast.)
+
+**3. Tạo instance trên Vast.ai:**
+- Image: `ghcr.io/spy-solution/moderation-service:latest`
 - Mở port **8000** (Docker options: `-p 8000:8000`).
 - Launch. Container tự chạy `uvicorn ... :8000`.
+
+> Nếu có Docker ở máy thì build tay cũng được: `docker build -t <user>/moderation:gpu . && docker push ...`
 
 **3. Lần khởi động đầu** sẽ tự tải model (~400MB: NSFW + RapidOCR + WeChat). Sau đó sẵn sàng.
 
