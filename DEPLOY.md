@@ -51,5 +51,6 @@ curl -X POST http://<IP>:<PORT>/moderate_url \
 - **Disk 32GB**: image PyTorch base ~7GB + deps ~2GB + model ~0.4GB → vừa đủ.
 - **CUDA**: máy Max CUDA 12.4 → base `cuda12.4-cudnn9` + `onnxruntime-gpu`. Nếu onnxruntime báo lỗi cuDNN, pin version: `pip install onnxruntime-gpu==1.19.2`.
 - **QR/WeChat** chạy CPU (opencv pip không có CUDA) — không ảnh hưởng, vốn nhanh.
-- Verify GPU sau khi chạy: `curl /health` phải trả `"gpu": true`. Nếu `false` → torch không thấy CUDA trong container (sai base image / driver).
+- Verify GPU sau khi chạy: `curl /health` phải trả `"gpu": true`. Nếu `false`:
+  - **Hay gặp ở Cách B**: box có sẵn torch build CUDA quá mới so với driver (vd torch CUDA13 vs driver 12.4) → log báo `NVIDIA driver too old (found version 12040)`. Sửa: `pip uninstall -y torch && pip install torch --index-url https://download.pytorch.org/whl/cu124`, rồi chạy lại. (Cách A Docker không dính vì base image torch khớp CUDA 12.4.)
 - Service hiện xử lý **ảnh**. Video (trích frame) là bước sau.
