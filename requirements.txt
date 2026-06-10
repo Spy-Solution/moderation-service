@@ -9,6 +9,7 @@ pyzbar                  # QR/barcode (Windows kèm DLL; Linux: apt-get install -
 opencv-contrib-python   # cv2 base + WeChat QR (KHÔNG cài chung opencv-python)
 rapidocr                # OCR qua ONNXRuntime
 onnxruntime             # GPU: thay bằng onnxruntime-gpu (xem requirements-gpu.txt)
+ultralytics             # YOLOv8 person detector (gate NSFW)
 
 # API service
 fastapi

@@ -13,6 +13,11 @@ import os, sys, io, re, glob, time, csv, argparse, unicodedata, pathlib, urllib.
 PROJ = pathlib.Path(__file__).resolve().parent
 os.environ.setdefault("HF_HOME", str(PROJ / ".hf_cache"))          # cache model -> project (off C:)
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")                       # tránh lỗi cp1252 trên Windows
+except Exception:
+    pass
+
 import numpy as np
 from PIL import Image
 
@@ -23,6 +28,8 @@ nsfw_clf = None        # transformers pipeline
 ocr_engine = None      # RapidOCR
 _OCR_NEW = True
 wechat_detector = None # cv2 WeChat QR (optional)
+person_model = None    # YOLO person detector (gate cho NSFW)
+_PERSON_DEVICE = "cpu"
 
 import cv2  # opencv-contrib-python (cv2 base + wechat_qrcode)
 
@@ -42,7 +49,7 @@ def _make_ocr_gpu(RapidOCR):
 
 
 def load_engines(use_gpu: bool = False, quiet: bool = False):
-    global nsfw_clf, ocr_engine, _OCR_NEW, wechat_detector
+    global nsfw_clf, ocr_engine, _OCR_NEW, wechat_detector, person_model, _PERSON_DEVICE
 
     def log(*a):
         if not quiet:
@@ -90,6 +97,16 @@ def load_engines(use_gpu: bool = False, quiet: bool = False):
     except Exception as e:
         wechat_detector = None
         log("[warn] WeChat QR off:", type(e).__name__, e)
+
+    # --- Person detector (gate NSFW): chỉ tin NSFW khi có người ĐỦ LỚN trong khung ---
+    try:
+        from ultralytics import YOLO
+        person_model = YOLO("yolov8n.pt")
+        _PERSON_DEVICE = 0 if use_gpu else "cpu"
+        log("[ok] Person: yolov8n | device:", _PERSON_DEVICE)
+    except Exception as e:
+        person_model = None
+        log("[warn] Person detector off (NSFW gate tắt):", type(e).__name__, e)
 
 
 # ======================================================================================
@@ -168,6 +185,7 @@ def detect_codes(img):
 # ======================================================================================
 UNSAFE_LABELS = {"porn", "hentai", "sexy"}
 ALL_LABELS = ["neutral", "drawings", "sexy", "porn", "hentai"]
+MIN_PERSON_AREA = 0.15      # người phải chiếm >= 15% khung mới tính (loại bàn tay/sản phẩm)
 
 def nsfw_breakdown(img):
     return {p["label"].lower(): float(p["score"]) for p in nsfw_clf(img)}
@@ -175,6 +193,21 @@ def nsfw_breakdown(img):
 def nsfw_score(img):
     nb = nsfw_breakdown(img)
     return sum(nb.get(k, 0.0) for k in UNSAFE_LABELS)
+
+def person_area(img):
+    """Diện tích box người LỚN NHẤT / diện tích ảnh. Không có detector -> trả 1.0 (gate mở)."""
+    if person_model is None:
+        return 1.0
+    arr = np.array(img.convert("RGB"))[:, :, ::-1]      # RGB -> BGR
+    r = person_model(arr, classes=[0], verbose=False, device=_PERSON_DEVICE)[0]
+    if len(r.boxes) == 0:
+        return 0.0
+    H, W = r.orig_shape
+    best = 0.0
+    for b in r.boxes.xyxy.cpu().numpy():
+        x1, y1, x2, y2 = b
+        best = max(best, float((x2 - x1) * (y2 - y1) / (W * H)))
+    return best
 
 
 # ======================================================================================
@@ -244,7 +277,9 @@ def moderate(src, nsfw_thr=0.5):
                 "nsfw": None, "detail": codes}
 
     nsfw = nsfw_score(img)
-    if nsfw >= nsfw_thr:
+    # Gate: chỉ REJECT nsfw khi model chấm cao VÀ có người đủ lớn trong khung
+    # (loại false-positive sản phẩm/review chỉ có bàn tay). person_area chỉ chạy khi nsfw cao.
+    if nsfw >= nsfw_thr and person_area(img) >= MIN_PERSON_AREA:
         return {"verdict": "REJECT", "violations": "nsfw", "nsfw": round(nsfw, 3), "detail": None}
 
     hits = text_violations(extract_text(img))
@@ -309,9 +344,10 @@ def main():
         try:
             img = load_image(p)
             row = {"file": os.path.basename(p)}
-            if args.nsfw_debug:                              # điểm 5 lớp cho MỌI ảnh
+            if args.nsfw_debug:                              # điểm 5 lớp + diện tích người
                 nb = nsfw_breakdown(img)
                 row.update({k: round(nb.get(k, 0.0), 3) for k in ALL_LABELS})
+                row["person"] = round(person_area(img), 3)
             r = moderate(img, args.nsfw_thr)
             row.update(verdict=r["verdict"], violations=r["violations"], nsfw=r["nsfw"])
             return row
@@ -335,6 +371,7 @@ def main():
         line = f"{row['verdict']:7} {row['file']:48} {row['violations']}"
         if args.nsfw_debug and "sexy" in row:
             line += "   " + " ".join(f"{k[:3]}={row[k]}" for k in ALL_LABELS)
+            line += f" person={row.get('person')}"
         print(line)
 
     print(f"\n{len(paths)} ảnh / {dt:.1f}s ({dt/len(paths):.2f}s/ảnh, "
@@ -342,7 +379,7 @@ def main():
           f"| REJECT={rej} ACCEPT={len(paths)-rej}")
 
     if args.csv:
-        cols = ["file", "verdict", "violations", "nsfw"] + (ALL_LABELS if args.nsfw_debug else [])
+        cols = ["file", "verdict", "violations", "nsfw"] + (ALL_LABELS + ["person"] if args.nsfw_debug else [])
         with open(args.csv, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
             w.writeheader(); w.writerows(results)
