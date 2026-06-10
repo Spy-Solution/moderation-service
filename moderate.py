@@ -88,7 +88,12 @@ def load_image(src):
 # ======================================================================================
 # 1) QR / BARCODE  (pyzbar đa scale+tiền xử lý -> cv2 -> WeChat)
 # ======================================================================================
-from pyzbar.pyzbar import decode as zbar_decode
+from pyzbar.pyzbar import decode as zbar_decode, ZBarSymbol
+
+# Chỉ giải QR + barcode bán lẻ phổ biến. Bỏ PDF417/DATABAR (decoder libzbar hay assert -> spam
+# warning + chậm, mà ta không cần mã loại đó).
+_ZSYMS = [ZBarSymbol.QRCODE, ZBarSymbol.EAN13, ZBarSymbol.EAN8, ZBarSymbol.UPCA, ZBarSymbol.UPCE,
+          ZBarSymbol.CODE128, ZBarSymbol.CODE39, ZBarSymbol.CODE93, ZBarSymbol.ITF, ZBarSymbol.CODABAR]
 
 CODE_SCALES = (1.0, 1.5, 2.0, 3.0)
 _CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -107,7 +112,7 @@ def detect_codes(img):
     for s in CODE_SCALES:
         im = base if s == 1.0 else base.resize((round(base.width * s), round(base.height * s)))
         for v in _gray_variants(np.array(im.convert("L"))):
-            for d in zbar_decode(v):
+            for d in zbar_decode(v, symbols=_ZSYMS):
                 found[(d.type, bytes(d.data))] = None
         if found:
             break
