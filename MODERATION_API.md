@@ -3,7 +3,7 @@
 Dịch vụ kiểm duyệt **ảnh / frame video** (self-host GPU). Gửi 1 ảnh → trả verdict.
 Phát hiện: **NSFW**, **QR/Barcode**, **TikTok**, **nền tảng đối thủ** (Facebook/Lazada/...).
 
-- Base URL: `http://91.150.160.38:16815`  *(đổi theo deploy thực tế)*
+- Base URL: Lấy từ infisical, key AI_MODERATION_URL trong shared (có thể xem cách lấy ở worker_upload) (example: http://91.150.160.38:16815)
 - Không cần API key.
 
 ---
@@ -97,6 +97,25 @@ for frac in (0.1, 0.25, 0.5, 0.75, 0.9):  # lấy 5 frame
 
 Khác biệt chính: API này nhận **ảnh** (không phải text), tự host nên **không tính tiền theo request**,
 và có thêm loại QR/TikTok/đối thủ đặc thù cho TMĐT.
+
+## Tải & giới hạn (BẮT BUỘC đọc nếu tích hợp)
+
+Server là **1 instance, 1 GPU (RTX 3060)** — **DÙNG CHUNG** cho mọi service.
+
+Số đo thực tế (64 ảnh, workload trộn):
+
+| Concurrency | Throughput | s/ảnh |
+|---|---|---|
+| 1 | ~0.5 ảnh/s | 1.96 |
+| **8 (tối ưu)** | **~4 ảnh/s** (~240/phút) | 0.24 |
+| 16 | ~3.6 ảnh/s (chậm hơn) | 0.275 |
+
+**Quy tắc cho service tích hợp:**
+- **Giới hạn ≤ 8 request đồng thời** (TỔNG của tất cả service cộng lại, không phải mỗi service). Vượt 8 **không nhanh hơn**, chỉ tăng độ trễ.
+- **Trần throughput ≈ 4 ảnh/giây** (~14k ảnh/giờ). Cần hơn → phải scale thêm instance.
+- 1 request lẻ: ~0.25–2s (gồm mạng). Đặt **timeout 60s**, **retry** khi lỗi mạng / 5xx.
+- Không có rate-limit phía server → **tự giới hạn** ở client (semaphore/queue).
+- Nhiều service cùng bắn → **tự điều phối** để tổng concurrency không vượt 8 (kẻo tranh nhau, latency tăng cho tất cả).
 
 ## Tinh chỉnh
 - `nsfw_thr` thấp = nhạy hơn (nhiều REJECT), cao = chặt hơn. Mặc định 0.5, dùng thực tế ~0.7.
