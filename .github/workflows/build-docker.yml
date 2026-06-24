@@ -41,4 +41,8 @@ jobs:
           context: .
           push: true
           provenance: false
-          tags: ghcr.io/spy-solution/moderation-service:latest
+          # latest + tag bất biến theo commit SHA. Vast cache theo tag -> trỏ vào tag SHA
+          # để CHẮC CHẮN repull image mới (tag :latest hay bị xài bản cache cũ).
+          tags: |
+            ghcr.io/spy-solution/moderation-service:latest
+            ghcr.io/spy-solution/moderation-service:${{ github.sha }}
