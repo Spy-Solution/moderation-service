@@ -36,10 +36,11 @@ def _make_ocr_gpu(RapidOCR):
     """Bật CUDA EP cho RapidOCR. Thử bản có GHÌM ARENA trước (chống VRAM phình theo từng
     input shape mới) rồi mới tới bản bật CUDA trơn; cuối cùng là API cũ. Khác nhau theo version
     nên bọc try/except: hỏng tuỳ chỉnh thì vẫn còn GPU, hỏng GPU thì caller fallback CPU."""
-    # kSameAsRequested: arena cấp đúng cỡ cần, không nhân đôi dự trữ -> không bò lên theo thời gian.
-    # cudnn_conv_algo_search=HEURISTIC: bỏ EXHAUSTIVE (cấp workspace lớn để dò thuật toán).
+    # cudnn_conv_algo_search=HEURISTIC: bỏ EXHAUSTIVE (mặc định) vốn benchmark lại thuật toán
+    # conv + cấp workspace lớn cho TỪNG shape mới -> rất chậm với OCR (ảnh/dòng chữ nhiều cỡ).
+    # KHÔNG ép arena_extend_strategy: mặc định kNextPowerOfTwo nhanh hơn, và đã có cap ảnh 1280
+    # giới hạn tập shape nên arena tự ổn định, không còn phình vô hạn theo thời gian.
     tuned = {"EngineConfig.onnxruntime.use_cuda": True,
-             "EngineConfig.onnxruntime.arena_extend_strategy": "kSameAsRequested",
              "EngineConfig.onnxruntime.cudnn_conv_algo_search": "HEURISTIC"}
     mem = os.environ.get("OCR_GPU_MEM_LIMIT")            # bytes, optional (vd 2147483648 = 2GB)
     if mem:
