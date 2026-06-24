@@ -4,7 +4,11 @@ FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 ENV DEBIAN_FRONTEND=noninteractive \
     HF_HUB_DISABLE_SYMLINKS_WARNING=1 \
     PIP_NO_CACHE_DIR=1 \
-    DEVICE=gpu
+    TRANSFORMERS_NO_ADVISORY_WARNINGS=1 \
+    DEVICE=gpu \
+    GPU_CONCURRENCY=12
+# GPU_CONCURRENCY=12: hợp Tesla P100 16GB. Trên GPU nhỏ hơn (vd 3060 12GB) hạ về 8.
+# Override per-instance khỏi rebuild: thêm "-e GPU_CONCURRENCY=8" vào Docker options trên Vast.
 
 # Thư viện hệ thống: zbar (pyzbar) + GL/glib (opencv).
 RUN apt-get update && apt-get install -y --no-install-recommends \
