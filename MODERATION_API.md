@@ -114,9 +114,15 @@ Số đo thực tế (64 ảnh, workload trộn):
 - **Giới hạn ≤ 8 request đồng thời** (TỔNG của tất cả service cộng lại, không phải mỗi service). Vượt 8 **không nhanh hơn**, chỉ tăng độ trễ.
 - **Trần throughput ≈ 4 ảnh/giây** (~14k ảnh/giờ). Cần hơn → phải scale thêm instance.
 - 1 request lẻ: ~0.25–2s (gồm mạng). Đặt **timeout 60s**, **retry** khi lỗi mạng / 5xx.
-- Không có rate-limit phía server → **tự giới hạn** ở client (semaphore/queue).
+- Server **tự chặn cứng** concurrency GPU bằng semaphore (mặc định 8) → request dư **xếp hàng**, không OOM. Client vẫn nên tự giới hạn để latency thấp.
 - Nhiều service cùng bắn → **tự điều phối** để tổng concurrency không vượt 8 (kẻo tranh nhau, latency tăng cho tất cả).
 
 ## Tinh chỉnh
 - `nsfw_thr` thấp = nhạy hơn (nhiều REJECT), cao = chặt hơn. Mặc định 0.5, dùng thực tế ~0.7.
 - Lỗi mạng/timeout → coi như cần xử lý lại (API có thể đang tải / quá tải).
+
+### Env tinh chỉnh phía server (chống VRAM phình / OOM)
+- `GPU_CONCURRENCY` (mặc định 8): trần inference GPU chạy song song. Hạ xuống nếu GPU nhỏ.
+- `MAX_OCR_SIDE` (mặc định 1280): cap max-side ảnh đẩy vào OCR, cắt đỉnh VRAM. 0 = tắt cap.
+- `EMPTY_CACHE_EVERY` (mặc định 200): mỗi N request gọi `torch.cuda.empty_cache()` chống phân mảnh. 0 = tắt.
+- `OCR_GPU_MEM_LIMIT` (bytes, optional): trần VRAM cho OCR onnxruntime, vd `2147483648` = 2GB.

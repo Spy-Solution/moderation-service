@@ -33,8 +33,19 @@ import cv2  # opencv-contrib-python (cv2 base + wechat_qrcode)
 
 
 def _make_ocr_gpu(RapidOCR):
-    """Thử bật CUDA EP cho RapidOCR qua vài kiểu param (khác nhau theo version)."""
-    for params in ({"EngineConfig.onnxruntime.use_cuda": True},
+    """Bật CUDA EP cho RapidOCR. Thử bản có GHÌM ARENA trước (chống VRAM phình theo từng
+    input shape mới) rồi mới tới bản bật CUDA trơn; cuối cùng là API cũ. Khác nhau theo version
+    nên bọc try/except: hỏng tuỳ chỉnh thì vẫn còn GPU, hỏng GPU thì caller fallback CPU."""
+    # kSameAsRequested: arena cấp đúng cỡ cần, không nhân đôi dự trữ -> không bò lên theo thời gian.
+    # cudnn_conv_algo_search=HEURISTIC: bỏ EXHAUSTIVE (cấp workspace lớn để dò thuật toán).
+    tuned = {"EngineConfig.onnxruntime.use_cuda": True,
+             "EngineConfig.onnxruntime.arena_extend_strategy": "kSameAsRequested",
+             "EngineConfig.onnxruntime.cudnn_conv_algo_search": "HEURISTIC"}
+    mem = os.environ.get("OCR_GPU_MEM_LIMIT")            # bytes, optional (vd 2147483648 = 2GB)
+    if mem:
+        tuned["EngineConfig.onnxruntime.gpu_mem_limit"] = int(mem)
+    for params in (tuned,
+                   {"EngineConfig.onnxruntime.use_cuda": True},
                    {"Global.use_cuda": True}):
         try:
             return RapidOCR(params=params)
@@ -199,8 +210,21 @@ def _parse_rapid(res):
             pass
     return out
 
+# Cap kích thước ảnh ĐẨY VÀO OCR: ảnh sản phẩm 4-6000px tạo feature map det khổng lồ ->
+# spike VRAM. Hạ max-side về ~1280 gần như không ảnh hưởng nhận chữ (OCR det vốn tự resize),
+# nhưng cắt mạnh đỉnh bộ nhớ GPU. KHÔNG cap ở khâu QR (chạy CPU, cần độ phân giải gốc).
+MAX_OCR_SIDE = int(os.environ.get("MAX_OCR_SIDE", "1280"))
+
+def _cap(img, max_side=MAX_OCR_SIDE):
+    w, h = img.size
+    m = max(w, h)
+    if max_side <= 0 or m <= max_side:
+        return img
+    s = max_side / m
+    return img.resize((max(1, round(w * s)), max(1, round(h * s))))
+
 def extract_text(img, min_conf=0.5):
-    res = ocr_engine(np.array(img.convert("RGB")))
+    res = ocr_engine(np.array(_cap(img).convert("RGB")))
     return [(t, s) for (t, s) in _parse_rapid(res) if s >= min_conf]
 
 _LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s",

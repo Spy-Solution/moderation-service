@@ -8,7 +8,7 @@ Endpoints:
 Chạy: uvicorn app:app --host 0.0.0.0 --port 8000
 Device: env DEVICE = gpu|cpu|auto (mặc định auto).
 """
-import io, os
+import io, os, threading
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from PIL import Image
@@ -17,6 +17,32 @@ import moderate as M
 
 app = FastAPI(title="Shopee Moderation Service", version="1.0")
 _STATE = {"gpu": False, "ready": False}
+
+# --- Trần concurrency GPU phía server -------------------------------------------------
+# Endpoint là sync def -> Starlette chạy trong threadpool (~40 thread). Nếu 1 client bắn
+# dồn (vd retry 5xx) thì hàng chục inference GPU chạy song song -> VRAM nhân lên -> OOM.
+# Semaphore này CHẶN CỨNG, không phụ thuộc client có tự giới hạn hay không. Mặc định 8
+# (= mốc tối ưu trong MODERATION_API.md). Phần dư xếp hàng, không bị từ chối.
+_GPU_LIMIT = max(1, int(os.environ.get("GPU_CONCURRENCY", "8")))
+_GPU_SEM = threading.Semaphore(_GPU_LIMIT)
+
+# Dọn caching allocator của torch định kỳ -> chống phân mảnh VRAM tích luỹ theo thời gian.
+_EMPTY_CACHE_EVERY = max(0, int(os.environ.get("EMPTY_CACHE_EVERY", "200")))
+_REQ = {"n": 0}
+_REQ_LOCK = threading.Lock()
+
+
+def _maybe_empty_cache():
+    if not _STATE["gpu"] or _EMPTY_CACHE_EVERY == 0:
+        return
+    with _REQ_LOCK:
+        _REQ["n"] += 1
+        do = _REQ["n"] % _EMPTY_CACHE_EVERY == 0
+    if do:
+        try:
+            import torch; torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 @app.on_event("startup")
@@ -39,11 +65,14 @@ def _startup():
 
 @app.get("/health")
 def health():
-    return {"status": "ok" if _STATE["ready"] else "loading", "gpu": _STATE["gpu"]}
+    return {"status": "ok" if _STATE["ready"] else "loading", "gpu": _STATE["gpu"],
+            "gpu_concurrency": _GPU_LIMIT}
 
 
 def _result(img, nsfw_thr):
-    r = M.moderate(img, nsfw_thr)
+    with _GPU_SEM:                                   # ghìm số inference GPU chạy cùng lúc
+        r = M.moderate(img, nsfw_thr)
+    _maybe_empty_cache()
     # bỏ field detail cồng kềnh (codes/hits) khỏi response gọn; giữ verdict + violations + nsfw
     return {"verdict": r["verdict"], "violations": r["violations"], "nsfw": r["nsfw"]}
 
