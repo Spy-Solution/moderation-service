@@ -17,9 +17,11 @@ WORKDIR /app
 # transformers PIN <4.49: bản mới cần torch>=2.7 (float8_e8m0fnu) -> vỡ với torch 2.5/2.6.
 # rapidocr kéo opencv-python về -> gỡ rồi cài opencv-contrib-python (superset, có WeChat QR)
 # để tránh 2 bản cv2 đụng nhau.
+# onnxruntime-gpu PIN: bản mới nhất build cho CUDA 13 (libcudart.so.13) -> vỡ với base
+# CUDA 12.4 (chỉ có libcudart.so.12). 1.20.1 build cho CUDA 12.x + cuDNN 9, khớp base.
 RUN pip install --no-cache-dir \
         "transformers==4.46.3" accelerate "pillow<12" numpy requests \
-        pyzbar rapidocr onnxruntime-gpu \
+        pyzbar rapidocr "onnxruntime-gpu==1.20.1" \
         fastapi "uvicorn[standard]" python-multipart \
     && pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true \
     && pip install --no-cache-dir opencv-contrib-python
