@@ -7,9 +7,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TRANSFORMERS_NO_ADVISORY_WARNINGS=1 \
     DEVICE=gpu \
     GPU_CONCURRENCY=12 \
-    MOD_TIMING=1
+    MOD_TIMING=0
 # GPU_CONCURRENCY=12: hợp Tesla P100 16GB. Trên GPU nhỏ hơn (vd 3060 12GB) hạ về 8.
-# MOD_TIMING=1: log thời gian từng stage (qr/nsfw/ocr) để chẩn đoán. Tắt (=0) sau khi xong.
+# MOD_TIMING=0: bật =1 (qua -e) khi cần log thời gian từng stage (qr/nsfw/ocr) để chẩn đoán.
 # QR mặc định đã nhẹ (xem moderate.py). Bật mạnh hơn: -e QR_FULL_VARIANTS=1 / QR_WECHAT=1.
 # Override per-instance khỏi rebuild: thêm "-e GPU_CONCURRENCY=8" vào Docker options trên Vast.
 
