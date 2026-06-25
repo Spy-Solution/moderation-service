@@ -33,7 +33,9 @@ RUN pip install --no-cache-dir \
     && pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true \
     && pip install --no-cache-dir opencv-contrib-python
 
-COPY moderate.py app.py ./
+COPY moderate.py app.py entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# entrypoint.sh thêm torch/lib + nvidia/*/lib vào LD_LIBRARY_PATH để onnxruntime thấy CUDA/cuDNN.
+CMD ["./entrypoint.sh"]

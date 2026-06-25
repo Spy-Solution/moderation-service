@@ -76,6 +76,40 @@ def _ocr_session_providers(engine):
     return out
 
 
+def _ocr_model_path(engine):
+    """Tìm 1 file .onnx của rapidocr để test session CUDA trực tiếp (đường dẫn khác nhau theo version)."""
+    for attr in ("text_det", "text_rec", "text_cls"):
+        comp = getattr(engine, attr, None)
+        sess = getattr(comp, "session", None)
+        for obj in (comp, sess):
+            for cand in ("model_path", "_model_path", "onnx_path"):
+                p = getattr(obj, cand, None)
+                if p and str(p).endswith(".onnx") and pathlib.Path(p).exists():
+                    return str(p)
+    return None
+
+
+def _probe_cuda_ort(engine, log):
+    """Thử tạo InferenceSession CUDA trực tiếp -> tách nguyên nhân OCR rớt CPU:
+    - FAIL (báo lỗi nạp lib) => onnxruntime không thấy libcudnn/libcudart (sửa LD_LIBRARY_PATH).
+    - OK nhưng rapidocr vẫn CPU => rapidocr không truyền cờ use_cuda (sửa config rapidocr)."""
+    try:
+        import onnxruntime as ort
+        ort.set_default_logger_severity(1)                   # in lý do EP fallback
+        path = _ocr_model_path(engine)
+        if not path:
+            log("[probe] không tìm thấy model .onnx để test CUDA"); return
+        try:
+            s = ort.InferenceSession(path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            log("[probe] ORT CUDA session OK ->", s.get_providers(),
+                "| => lib CUDA OK, lỗi ở config rapidocr")
+        except Exception as e:
+            log("[probe] ORT CUDA session FAIL ->", type(e).__name__, str(e)[:300],
+                "| => onnxruntime KHÔNG nạp được lib CUDA/cuDNN")
+    except Exception as e:
+        log("[probe] lỗi:", type(e).__name__, e)
+
+
 def load_engines(use_gpu: bool = False, quiet: bool = False):
     global nsfw_clf, ocr_engine, _OCR_NEW, wechat_detector
 
@@ -109,6 +143,7 @@ def load_engines(use_gpu: bool = False, quiet: bool = False):
         "| session providers:", sess_prov or "(không soi được)")
     if use_gpu and sess_prov and not any("CUDA" in str(p) for p in sess_prov.values()):
         log("[WARN] OCR KHÔNG dùng CUDA -> đang chạy CPU, sẽ rất chậm. Kiểm tra onnxruntime-gpu.")
+        _probe_cuda_ort(ocr_engine, log)   # test trực tiếp: lib CUDA/cuDNN có nạp được không?
 
     # --- WeChat QR: TẮT mặc định (super-resolution caffe = phần đắt nhất của QR scan trên CPU).
     # Bật lại bằng QR_WECHAT=1 nếu cần bắt QR mờ/nhỏ. ---
