@@ -41,12 +41,13 @@ def _make_ocr_gpu(RapidOCR):
     # KHÔNG ép arena_extend_strategy: mặc định kNextPowerOfTwo nhanh hơn, và đã có cap ảnh 1280
     # giới hạn tập shape nên arena tự ổn định, không còn phình vô hạn theo thời gian.
     tuned = {"EngineConfig.onnxruntime.use_cuda": True,
+             "EngineConfig.onnxruntime.gpu_id": 0,
              "EngineConfig.onnxruntime.cudnn_conv_algo_search": "HEURISTIC"}
     mem = os.environ.get("OCR_GPU_MEM_LIMIT")            # bytes, optional (vd 2147483648 = 2GB)
     if mem:
         tuned["EngineConfig.onnxruntime.gpu_mem_limit"] = int(mem)
     for params in (tuned,
-                   {"EngineConfig.onnxruntime.use_cuda": True},
+                   {"EngineConfig.onnxruntime.use_cuda": True, "EngineConfig.onnxruntime.gpu_id": 0},
                    {"Global.use_cuda": True}):
         try:
             return RapidOCR(params=params)
@@ -56,6 +57,23 @@ def _make_ocr_gpu(RapidOCR):
         return RapidOCR(det_use_cuda=True, cls_use_cuda=True, rec_use_cuda=True)  # API cũ
     except Exception:
         return None
+
+
+def _ocr_session_providers(engine):
+    """Soi provider THỰC mà từng session OCR (det/cls/rec) đang dùng. ort.get_available_providers()
+    chỉ liệt kê EP được CÀI, không phải EP đang chạy -> cần cái này để biết OCR có thật sự trên CUDA."""
+    out = {}
+    for attr in ("text_det", "text_cls", "text_rec"):
+        comp = getattr(engine, attr, None)
+        sess = getattr(comp, "session", None)
+        real = getattr(sess, "session", sess)                # rapidocr bọc 1-2 lớp quanh ORT session
+        gp = getattr(real, "get_providers", None)
+        if callable(gp):
+            try:
+                out[attr] = gp()
+            except Exception:
+                pass
+    return out
 
 
 def load_engines(use_gpu: bool = False, quiet: bool = False):
@@ -85,27 +103,32 @@ def load_engines(use_gpu: bool = False, quiet: bool = False):
     except ImportError:
         from rapidocr_onnxruntime import RapidOCR; _OCR_NEW = False
     ocr_engine = (_make_ocr_gpu(RapidOCR) if use_gpu else None) or RapidOCR()
-    try:
-        import onnxruntime as ort
-        log("[ok] OCR: RapidOCR", "(new)" if _OCR_NEW else "(old)",
-            "| ORT providers:", ort.get_available_providers())
-    except Exception:
-        log("[ok] OCR: RapidOCR", "(new)" if _OCR_NEW else "(old)")
+    # Log provider THỰC của từng session -> biết ngay OCR chạy CUDA hay rớt CPU (nguồn chậm ~10s).
+    sess_prov = _ocr_session_providers(ocr_engine)
+    log("[ok] OCR: RapidOCR", "(new)" if _OCR_NEW else "(old)",
+        "| session providers:", sess_prov or "(không soi được)")
+    if use_gpu and sess_prov and not any("CUDA" in str(p) for p in sess_prov.values()):
+        log("[WARN] OCR KHÔNG dùng CUDA -> đang chạy CPU, sẽ rất chậm. Kiểm tra onnxruntime-gpu.")
 
-    # --- WeChat QR (optional) ---
-    try:
-        m = PROJ / ".models" / "wechat_qrcode"; m.mkdir(parents=True, exist_ok=True)
-        base = "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/"
-        for f in ("detect.prototxt", "detect.caffemodel", "sr.prototxt", "sr.caffemodel"):
-            if not (m / f).exists():
-                log("    tải", f); urllib.request.urlretrieve(base + f, m / f)
-        wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
-            str(m / "detect.prototxt"), str(m / "detect.caffemodel"),
-            str(m / "sr.prototxt"),     str(m / "sr.caffemodel"))
-        log("[ok] WeChat QR")
-    except Exception as e:
+    # --- WeChat QR: TẮT mặc định (super-resolution caffe = phần đắt nhất của QR scan trên CPU).
+    # Bật lại bằng QR_WECHAT=1 nếu cần bắt QR mờ/nhỏ. ---
+    if os.environ.get("QR_WECHAT", "0") == "1":
+        try:
+            m = PROJ / ".models" / "wechat_qrcode"; m.mkdir(parents=True, exist_ok=True)
+            base = "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/"
+            for f in ("detect.prototxt", "detect.caffemodel", "sr.prototxt", "sr.caffemodel"):
+                if not (m / f).exists():
+                    log("    tải", f); urllib.request.urlretrieve(base + f, m / f)
+            wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
+                str(m / "detect.prototxt"), str(m / "detect.caffemodel"),
+                str(m / "sr.prototxt"),     str(m / "sr.caffemodel"))
+            log("[ok] WeChat QR")
+        except Exception as e:
+            wechat_detector = None
+            log("[warn] WeChat QR off:", type(e).__name__, e)
+    else:
         wechat_detector = None
-        log("[warn] WeChat QR off:", type(e).__name__, e)
+        log("[info] WeChat QR off (đặt QR_WECHAT=1 để bật)")
 
 
 # ======================================================================================
@@ -135,20 +158,39 @@ _ZSYM_NAMES = ["QRCODE", "EAN13", "EAN8", "UPCA", "UPCE",
 _ZSYMS = [getattr(ZBarSymbol, n) for n in _ZSYM_NAMES if hasattr(ZBarSymbol, n)]
 
 import threading
-CODE_SCALES = (1.0, 1.5, 2.0, 3.0)
+
+def _env_floats(name, default):
+    v = os.environ.get(name)
+    if not v:
+        return default
+    try:
+        return tuple(float(x) for x in v.split(",") if x.strip())
+    except Exception:
+        return default
+
+# QR scan là phần CPU nặng nhất (zbar quét 10 loại mã 1D, mỗi scale × mỗi biến thể là 1 lượt).
+# MẶC ĐỊNH NHẸ để hợp box CPU yếu: 2 scale + 2 biến thể (gray + Otsu) + cap ảnh 1600.
+# Bật QR_FULL_VARIANTS=1 / QR_SCALES="1,1.5,2,3" / QR_MAX_SIDE=0 nếu cần bắt QR khó hơn (chậm hơn).
+CODE_SCALES = _env_floats("QR_SCALES", (1.0, 2.0))
+QR_MAX_SIDE = int(os.environ.get("QR_MAX_SIDE", "1600"))       # cap cạnh dài ảnh base trước khi quét
+QR_FULL_VARIANTS = os.environ.get("QR_FULL_VARIANTS", "0") == "1"
 _SHARPEN = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])     # hằng số read-only -> share an toàn
 _WECHAT_LOCK = threading.Lock()                                # WeChat detector không thread-safe
 
 def _gray_variants(gray):
-    # Tạo CLAHE per-call: object cv2 có state nội bộ, share giữa thread -> C++ exception.
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     yield gray
-    yield clahe.apply(gray)
     yield cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-    yield cv2.filter2D(gray, -1, _SHARPEN)
+    if QR_FULL_VARIANTS:                                        # 2 biến thể đắt thêm, chỉ khi cần
+        # Tạo CLAHE per-call: object cv2 có state nội bộ, share giữa thread -> C++ exception.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        yield clahe.apply(gray)
+        yield cv2.filter2D(gray, -1, _SHARPEN)
 
 def detect_codes(img):
     base = img.convert("RGB")
+    if QR_MAX_SIDE > 0 and max(base.size) > QR_MAX_SIDE:        # ảnh to -> hạ trước, đỡ tốn zbar
+        sc = QR_MAX_SIDE / max(base.size)
+        base = base.resize((max(1, round(base.width * sc)), max(1, round(base.height * sc))))
     found = {}
     for s in CODE_SCALES:
         im = base if s == 1.0 else base.resize((round(base.width * s), round(base.height * s)))
@@ -270,19 +312,29 @@ def text_violations(texts):
 # ======================================================================================
 # PIPELINE
 # ======================================================================================
+# Bật MOD_TIMING=1 để in thời gian từng stage (qr/nsfw/ocr) mỗi ảnh -> chẩn đoán điểm nghẽn.
+_TIMING = os.environ.get("MOD_TIMING", "0") == "1"
+
 def moderate(src, nsfw_thr=0.5):
     img = load_image(src)
+    _t = [time.time()]
+    def _lap(stage):
+        if _TIMING:
+            now = time.time(); print(f"[t] {stage}: {now - _t[0]:.3f}s", file=sys.stderr); _t[0] = now
 
     codes = detect_codes(img)
+    _lap("qr")
     if codes:
         return {"verdict": "REJECT", "violations": "qr_barcode",
                 "nsfw": None, "detail": codes}
 
     nsfw = nsfw_score(img)
+    _lap("nsfw")
     if nsfw >= nsfw_thr:
         return {"verdict": "REJECT", "violations": "nsfw", "nsfw": round(nsfw, 3), "detail": None}
 
     hits = text_violations(extract_text(img))
+    _lap("ocr")
     if hits:
         return {"verdict": "REJECT", "violations": ",".join(hits),
                 "nsfw": round(nsfw, 3), "detail": hits}
