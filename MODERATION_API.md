@@ -29,9 +29,35 @@ curl -X POST http://91.150.160.38:16815/moderate_url \
      -d '{"url": "https://.../anh.jpg", "nsfw_thr": 0.7}'
 ```
 
+### `POST /moderate/batch` — nhiều frame của 1 video trong 1 request
+Form-data: `files` lặp lại N lần (tối đa `BATCH_MAX_FILES`, mặc định 16). Query: `nsfw_thr`,
+`stop_on_reject` (mặc định `true`). Server chạy theo stage: QR mọi frame (CPU, song song) →
+NSFW gộp 1 batch GPU → OCR từng frame. `stop_on_reject=true`: có frame REJECT thì các frame còn lại
+bỏ stage đắt hơn và trả `SKIPPED` (giống client dừng sớm khi gửi tuần tự).
+
+```bash
+curl -F "files=@f0.jpg" -F "files=@f1.jpg" -F "files=@f2.jpg"      "http://<host>/moderate/batch?nsfw_thr=0.7"
+```
+```json
+{ "verdict": "REJECT", "violations": "tiktok", "reject_index": 1,
+  "results": [
+    {"index": 0, "verdict": "ACCEPT",  "violations": "",       "nsfw": 0.01},
+    {"index": 1, "verdict": "REJECT",  "violations": "tiktok", "nsfw": 0.02},
+    {"index": 2, "verdict": "SKIPPED", "violations": "",       "nsfw": 0.03}
+  ] }
+```
+- `verdict` tổng: `REJECT` nếu có ≥1 frame REJECT, ngược lại `ACCEPT`.
+- `violations` tổng: hợp các loại vi phạm (sort, ngăn bởi dấu phẩy). `reject_index`: frame REJECT đầu tiên (theo index) hoặc `null`.
+- `results[i].verdict`: `ACCEPT` / `REJECT` / `SKIPPED` (không chấm hết vì đã có frame khác REJECT).
+- `nsfw` của frame bị loại ở QR / skip trước NSFW là `null`.
+- Lỗi: 400 nếu 1 file không đọc được ảnh (`detail` có index), 413 nếu quá số file.
+
+Mọi response có header **`X-Process-Ms`** = thời gian phía server (gồm chờ hàng đợi GPU).
+Latency client đo được − `X-Process-Ms` ≈ mạng + upload.
+
 ---
 
-## Response (cả 2 endpoint)
+## Response (`/moderate`, `/moderate_url`)
 ```json
 { "verdict": "REJECT", "violations": "nsfw", "nsfw": 0.94 }
 ```
@@ -126,3 +152,6 @@ Số đo thực tế (64 ảnh, workload trộn):
 - `MAX_OCR_SIDE` (mặc định 1280): cap max-side ảnh đẩy vào OCR, cắt đỉnh VRAM. 0 = tắt cap.
 - `EMPTY_CACHE_EVERY` (mặc định 200): mỗi N request gọi `torch.cuda.empty_cache()` chống phân mảnh. 0 = tắt.
 - `OCR_GPU_MEM_LIMIT` (bytes, optional): trần VRAM cho OCR onnxruntime, vd `2147483648` = 2GB.
+- `UVICORN_WORKERS` (mặc định 1): số process uvicorn. Mỗi process load model riêng (~1–1.5GB VRAM) và có semaphore `GPU_CONCURRENCY` riêng → tăng khi CPU còn rảnh mà GIL nghẽn.
+- `BATCH_MAX_FILES` (mặc định 16): số frame tối đa / request `/moderate/batch`.
+- `QR_THREADS` (mặc định min(8, số CPU)): pool quét QR song song trong 1 batch.

@@ -4,12 +4,14 @@ Endpoints:
     GET  /health                      -> trạng thái + device
     POST /moderate      (file upload) -> verdict JSON
     POST /moderate_url  ({"url": ...}) -> verdict JSON
+    POST /moderate/batch (files[] upload) -> verdict tổng + từng frame (1 round-trip / video)
 
 Chạy: uvicorn app:app --host 0.0.0.0 --port 8000
 Device: env DEVICE = gpu|cpu|auto (mặc định auto).
 """
-import io, os, threading
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import io, os, threading, time
+from typing import List
+from fastapi import FastAPI, Request, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from PIL import Image
 
@@ -17,6 +19,17 @@ import moderate as M
 
 app = FastAPI(title="Shopee Moderation Service", version="1.0")
 _STATE = {"gpu": False, "ready": False}
+_BATCH_MAX = max(1, int(os.environ.get("BATCH_MAX_FILES", "16")))
+
+
+@app.middleware("http")
+async def _process_time(request: Request, call_next):
+    # Thời gian xử lý PHÍA SERVER (gồm cả xếp hàng chờ semaphore) -> client lấy latency đo được
+    # trừ đi số này = phần mạng/upload.
+    t0 = time.perf_counter()
+    resp = await call_next(request)
+    resp.headers["X-Process-Ms"] = str(round((time.perf_counter() - t0) * 1000))
+    return resp
 
 # --- Trần concurrency GPU phía server -------------------------------------------------
 # Endpoint là sync def -> Starlette chạy trong threadpool (~40 thread). Nếu 1 client bắn
@@ -66,7 +79,7 @@ def _startup():
 @app.get("/health")
 def health():
     return {"status": "ok" if _STATE["ready"] else "loading", "gpu": _STATE["gpu"],
-            "gpu_concurrency": _GPU_LIMIT}
+            "gpu_concurrency": _GPU_LIMIT, "batch_max_files": _BATCH_MAX}
 
 
 def _result(img, nsfw_thr):
@@ -97,3 +110,29 @@ def moderate_url(req: UrlReq):
         return _result(req.url, req.nsfw_thr)   # M.load_image xử lý http URL
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Lỗi: {type(e).__name__}: {e}")
+
+
+@app.post("/moderate/batch")
+def moderate_batch(files: List[UploadFile] = File(...), nsfw_thr: float = 0.5,
+                   stop_on_reject: bool = True):
+    """Nhiều frame của CÙNG 1 video trong 1 request. Giữ 1 slot semaphore cho cả batch
+    (bên trong OCR chạy tuần tự -> đỉnh VRAM mỗi slot ~ 1 OCR + 1 NSFW batch)."""
+    if len(files) > _BATCH_MAX:
+        raise HTTPException(status_code=413, detail=f"Tối đa {_BATCH_MAX} file / request")
+    imgs = []
+    for i, f in enumerate(files):
+        try:
+            imgs.append(Image.open(io.BytesIO(f.file.read())).convert("RGB"))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Không đọc được ảnh index={i}")
+    with _GPU_SEM:
+        rs = M.moderate_batch(imgs, nsfw_thr, stop_on_reject)
+    _maybe_empty_cache()
+    results = [{"index": i, "verdict": r["verdict"], "violations": r["violations"], "nsfw": r["nsfw"]}
+               for i, r in enumerate(rs)]
+    rejects = [r for r in results if r["verdict"] == "REJECT"]
+    violations = sorted({v for r in rejects for v in r["violations"].split(",") if v})
+    return {"verdict": "REJECT" if rejects else "ACCEPT",
+            "violations": ",".join(violations),
+            "reject_index": rejects[0]["index"] if rejects else None,
+            "results": results}

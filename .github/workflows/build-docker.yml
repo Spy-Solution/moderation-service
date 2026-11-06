@@ -9,6 +9,7 @@ on:
       - "Dockerfile"
       - "app.py"
       - "moderate.py"
+      - "entrypoint.sh"
       - ".github/workflows/build-docker.yml"
 
 jobs:

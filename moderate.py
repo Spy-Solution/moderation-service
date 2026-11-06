@@ -377,6 +377,74 @@ def moderate(src, nsfw_thr=0.5):
     return {"verdict": "ACCEPT", "violations": "", "nsfw": round(nsfw, 3), "detail": None}
 
 
+# Pool CPU cho QR của batch: pyzbar (ctypes) + cv2 nhả GIL -> quét song song nhiều frame thật sự.
+_QR_POOL = None
+_QR_POOL_LOCK = threading.Lock()
+
+def _qr_pool():
+    global _QR_POOL
+    with _QR_POOL_LOCK:
+        if _QR_POOL is None:
+            from concurrent.futures import ThreadPoolExecutor
+            n = int(os.environ.get("QR_THREADS", "0")) or min(8, os.cpu_count() or 4)
+            _QR_POOL = ThreadPoolExecutor(max_workers=n, thread_name_prefix="qr")
+        return _QR_POOL
+
+
+def moderate_batch(srcs, nsfw_thr=0.5, stop_on_reject=True):
+    """Nhiều frame (cùng 1 video) trong 1 lượt, chạy THEO STAGE thay vì theo frame:
+    QR mọi frame song song (CPU) -> NSFW gộp 1 forward pass (GPU batch) -> OCR từng frame.
+    stop_on_reject: có frame REJECT ở stage nào thì bỏ các stage đắt hơn cho frame còn lại
+    (verdict SKIPPED) -> giữ được lợi ích dừng sớm như client gửi tuần tự."""
+    imgs = [load_image(s) for s in srcs]
+    n = len(imgs)
+    out = [None] * n
+    _t = [time.time()]
+    def _lap(stage):
+        if _TIMING:
+            now = time.time(); print(f"[t] batch{n} {stage}: {now - _t[0]:.3f}s", file=sys.stderr); _t[0] = now
+
+    def _skip_rest(nsfw_of=None):
+        for i in range(n):
+            if out[i] is None:
+                v = nsfw_of.get(i) if nsfw_of else None
+                out[i] = {"verdict": "SKIPPED", "violations": "", "nsfw": v, "detail": None}
+
+    codes = list(_qr_pool().map(detect_codes, imgs))
+    _lap("qr")
+    for i, c in enumerate(codes):
+        if c:
+            out[i] = {"verdict": "REJECT", "violations": "qr_barcode", "nsfw": None, "detail": c}
+    if stop_on_reject and any(out):
+        _skip_rest(); return out
+
+    todo = [i for i in range(n) if out[i] is None]
+    preds = nsfw_clf([imgs[i] for i in todo], batch_size=len(todo)) if todo else []
+    nsfw = {}
+    for i, p in zip(todo, preds):
+        s = sum(float(d["score"]) for d in p if d["label"].lower() in UNSAFE_LABELS)
+        nsfw[i] = round(s, 3)
+        if s >= nsfw_thr:
+            out[i] = {"verdict": "REJECT", "violations": "nsfw", "nsfw": nsfw[i], "detail": None}
+    _lap("nsfw")
+    if stop_on_reject and any(out):
+        _skip_rest(nsfw); return out
+
+    for i in todo:
+        if out[i] is not None:
+            continue
+        hits = text_violations(extract_text(imgs[i]))
+        if hits:
+            out[i] = {"verdict": "REJECT", "violations": ",".join(hits), "nsfw": nsfw[i], "detail": hits}
+            if stop_on_reject:
+                break
+        else:
+            out[i] = {"verdict": "ACCEPT", "violations": "", "nsfw": nsfw[i], "detail": None}
+    _lap("ocr")
+    _skip_rest(nsfw)
+    return out
+
+
 # ======================================================================================
 # CLI
 # ======================================================================================

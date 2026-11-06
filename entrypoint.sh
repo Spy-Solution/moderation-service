@@ -13,4 +13,6 @@ for sp in site.getsitepackages():
 print(":".join(ds))' 2>/dev/null || true)"
 export LD_LIBRARY_PATH="${TORCH_LIB}:${NV_LIBS}:/opt/conda/lib:${LD_LIBRARY_PATH}"
 echo "[entrypoint] LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
-exec uvicorn app:app --host 0.0.0.0 --port 8000
+# UVICORN_WORKERS>1: nhiều process (mỗi process tự load model, ~1-1.5GB VRAM) -> vượt GIL cho
+# phần CPU (QR, decode, preprocess). GPU_CONCURRENCY là trần RIÊNG của từng worker.
+exec uvicorn app:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-1}"
