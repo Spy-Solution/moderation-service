@@ -25,13 +25,16 @@ WORKDIR /app
 # rapidocr kéo opencv-python về -> gỡ rồi cài opencv-contrib-python (superset, có WeChat QR)
 # để tránh 2 bản cv2 đụng nhau.
 # onnxruntime-gpu PIN: bản mới nhất build cho CUDA 13 (libcudart.so.13) -> vỡ với base
-# CUDA 12.4 (chỉ có libcudart.so.12). 1.20.1 build cho CUDA 12.x + cuDNN 9, khớp base.
+# CUDA 12.4 (chỉ có libcudart.so.12). 1.20.2 build cho CUDA 12.x + cuDNN 9, khớp base.
+# (1.20.1 đã bị gỡ khỏi PyPI.) KHÔNG nối "|| true" vào chuỗi && -> nó nuốt lỗi pip, CI vẫn xanh
+# mà image thiếu hết deps. Bọc riêng lệnh được phép lỗi trong ( ... || true).
 RUN pip install --no-cache-dir \
         "transformers==4.46.3" accelerate "pillow<12" numpy requests \
-        pyzbar rapidocr "onnxruntime-gpu==1.20.1" \
+        pyzbar rapidocr "onnxruntime-gpu==1.20.2" \
         fastapi "uvicorn[standard]" python-multipart \
-    && pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true \
-    && pip install --no-cache-dir opencv-contrib-python
+    && (pip uninstall -y opencv-python opencv-python-headless || true) \
+    && pip install --no-cache-dir opencv-contrib-python \
+    && python -c "import uvicorn, fastapi, multipart, transformers, rapidocr, onnxruntime, cv2, pyzbar.pyzbar; cv2.wechat_qrcode_WeChatQRCode; print('deps ok', onnxruntime.__version__)"
 
 COPY moderate.py app.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
