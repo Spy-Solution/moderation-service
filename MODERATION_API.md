@@ -155,5 +155,9 @@ Số đo thực tế (64 ảnh, workload trộn):
 - `UVICORN_WORKERS` (mặc định 1): số process uvicorn. Mỗi process load model riêng và có semaphore `GPU_CONCURRENCY` riêng → tăng khi CPU còn rảnh mà GIL nghẽn. Khuyến nghị: GPU 16GB → **2** worker (3 worker từng OOM ở ≥36 request batch đồng thời); 24GB → 3.
 - VRAM tự chia theo worker (`VRAM_BUDGET=1` mặc định): mỗi worker được `VRAM_USABLE`(0.92) × VRAM / `UVICORN_WORKERS`; torch (NSFW) trần `TORCH_VRAM_GB` (1.5), OCR onnxruntime nhận phần còn lại trừ `CUDA_CTX_RESERVE_GB` (0.7) làm `gpu_mem_limit` (trừ khi đặt `OCR_GPU_MEM_LIMIT`). Xem `GET /health` → `vram_budget`, `ocr_providers` (phải chứa `CUDAExecutionProvider`).
 - Hết VRAM giữa chừng → **503 + `Retry-After: 1`** (lỗi tạm, client nên retry), không còn 500.
+- Hàng đợi GPU là **FIFO**; request chờ slot quá `QUEUE_TIMEOUT_S` (mặc định 30) → **503 + `Retry-After: 2`** thay vì treo tới khi client timeout. Header **`X-Queue-Ms`** = thời gian chờ slot (X-Process-Ms − X-Queue-Ms ≈ xử lý thật). `/health` có `gpu_busy`, `queue_waiting`.
+- `THREADPOOL_SIZE` (mặc định 128): thread anyio mỗi worker (mặc định của Starlette là 40; request vượt mức đó kẹt ngoài hàng đợi, không có timeout).
+- CPU tự chia theo worker từ quota cgroup thật (không phải số lõi host): torch + onnxruntime intra-op + pool QR mỗi worker dùng `quota / UVICORN_WORKERS` thread; cv2 1 thread. Ghi đè bằng `CPU_THREADS`. Xem `/health` → `cpu_threads`.
+- `UVICORN_KEEPALIVE` (mặc định 75s): keep-alive timeout của uvicorn (mặc định gốc 5s gây "Connection aborted" khi client dùng lại kết nối rảnh).
 - `BATCH_MAX_FILES` (mặc định 16): số frame tối đa / request `/moderate/batch`.
 - `QR_THREADS` (mặc định min(8, số CPU)): pool quét QR song song trong 1 batch.

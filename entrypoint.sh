@@ -18,4 +18,7 @@ export LD_LIBRARY_PATH="${TORCH_LIB}:${NV_LIBS}:/opt/conda/lib:${LD_LIBRARY_PATH
 echo "[entrypoint] LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
 # UVICORN_WORKERS>1: nhiều process (mỗi process tự load model, ~1-1.5GB VRAM) -> vượt GIL cho
 # phần CPU (QR, decode, preprocess). GPU_CONCURRENCY là trần RIÊNG của từng worker.
-exec python -m uvicorn app:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-1}"
+# timeout-keep-alive: mặc định uvicorn 5s -> server đóng kết nối rảnh đúng lúc client (pool
+# keep-alive) gửi request kế -> "Connection aborted". Để dài hơn idle timeout của client.
+exec python -m uvicorn app:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-1}" \
+    --timeout-keep-alive "${UVICORN_KEEPALIVE:-75}"

@@ -30,6 +30,7 @@ _OCR_NEW = True
 wechat_detector = None # cv2 WeChat QR (optional)
 ocr_providers = None   # provider THỰC của các session OCR -> /health
 vram_budget = None     # trần VRAM đã áp cho process này -> /health
+cpu_threads = None     # số thread CPU / thư viện đã áp cho process này -> /health
 
 import cv2  # opencv-contrib-python (cv2 base + wechat_qrcode)
 
@@ -47,6 +48,7 @@ def _make_ocr_gpu(RapidOCR):
     # HEURISTIC + gpu_mem_limit chưa từng có tác dụng (vẫn EXHAUSTIVE, arena không trần).
     ep = "EngineConfig.onnxruntime.cuda_ep_cfg."
     tuned = {"EngineConfig.onnxruntime.use_cuda": True,
+             "EngineConfig.onnxruntime.intra_op_num_threads": cpu_threads or -1,
              ep + "device_id": 0,
              ep + "cudnn_conv_algo_search": "HEURISTIC"}
     mem = os.environ.get("OCR_GPU_MEM_LIMIT")            # bytes, optional (vd 2147483648 = 2GB)
@@ -110,6 +112,42 @@ def _ocr_session_providers(engine, max_depth=5):
             if not isinstance(v, (str, bytes, int, float, bool, type(None), np.ndarray)):
                 stack.append((v, kp, d + 1))
     return out
+
+
+def _cpu_quota():
+    """Số CPU THẬT container được dùng. os.cpu_count() trả số lõi của HOST (vd 32) dù cgroup
+    chỉ cho 15 -> mỗi thư viện tự mở pool cỡ host, nhân với số worker -> tranh CPU nặng."""
+    try:
+        q, per = open("/sys/fs/cgroup/cpu.max").read().split()[:2]           # cgroup v2
+        if q != "max":
+            return max(1, int(int(q) / int(per)))
+    except Exception:
+        pass
+    try:
+        q = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())         # cgroup v1
+        per = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        if q > 0:
+            return max(1, q // per)
+    except Exception:
+        pass
+    try:
+        return len(os.sched_getaffinity(0))
+    except Exception:
+        return os.cpu_count() or 4
+
+
+def _apply_cpu_budget(log):
+    """Chia CPU cho UVICORN_WORKERS process: torch intra-op, ORT intra-op, pool QR mỗi worker
+    chỉ dùng phần của mình. CPU_THREADS đặt tay thì ghi đè."""
+    global cpu_threads
+    workers = max(1, int(os.environ.get("UVICORN_WORKERS", "1")))
+    cpu_threads = int(os.environ.get("CPU_THREADS", "0")) or max(1, _cpu_quota() // workers)
+    try:
+        import torch; torch.set_num_threads(cpu_threads)
+    except Exception:
+        pass
+    cv2.setNumThreads(1)        # song song đã có ở mức request/frame; cv2 tự đa luồng mỗi call -> thừa
+    log(f"[ok] CPU budget: {cpu_threads} thread/worker (quota {_cpu_quota()}, {workers} worker)")
 
 
 def _apply_vram_budget(log):
@@ -180,6 +218,7 @@ def load_engines(use_gpu: bool = False, quiet: bool = False):
         if not quiet:
             print(*a, file=sys.stderr)
 
+    _apply_cpu_budget(log)
     if use_gpu:
         _apply_vram_budget(log)      # TRƯỚC khi tạo session ORT (gpu_mem_limit đọc lúc tạo)
 
@@ -452,7 +491,7 @@ def _qr_pool():
     with _QR_POOL_LOCK:
         if _QR_POOL is None:
             from concurrent.futures import ThreadPoolExecutor
-            n = int(os.environ.get("QR_THREADS", "0")) or min(8, os.cpu_count() or 4)
+            n = int(os.environ.get("QR_THREADS", "0")) or min(8, cpu_threads or os.cpu_count() or 4)
             _QR_POOL = ThreadPoolExecutor(max_workers=n, thread_name_prefix="qr")
         return _QR_POOL
 
