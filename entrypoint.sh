@@ -4,6 +4,9 @@
 # KHÔNG trên đường dẫn mặc định -> onnxruntime không thấy -> rớt CPU âm thầm.
 # Phải set LD_LIBRARY_PATH TRƯỚC khi Python chạy (dlopen đọc env lúc process khởi động).
 set -e
+# Vast chạy image ở chế độ ssh/jupyter thì KHÔNG giữ ENV PATH của image -> thiếu /opt/conda/bin
+# -> "uvicorn: not found". Tự thêm lại cho chắc.
+export PATH="/opt/conda/bin:${PATH}"
 TORCH_LIB="$(python -c 'import os,torch; print(os.path.join(os.path.dirname(torch.__file__),"lib"))' 2>/dev/null || true)"
 # nvidia-* pip packages (cudnn/cublas...) nếu có, mỗi gói 1 thư mục lib riêng.
 NV_LIBS="$(python -c 'import os,glob,site
@@ -15,4 +18,4 @@ export LD_LIBRARY_PATH="${TORCH_LIB}:${NV_LIBS}:/opt/conda/lib:${LD_LIBRARY_PATH
 echo "[entrypoint] LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
 # UVICORN_WORKERS>1: nhiều process (mỗi process tự load model, ~1-1.5GB VRAM) -> vượt GIL cho
 # phần CPU (QR, decode, preprocess). GPU_CONCURRENCY là trần RIÊNG của từng worker.
-exec uvicorn app:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-1}"
+exec python -m uvicorn app:app --host 0.0.0.0 --port 8000 --workers "${UVICORN_WORKERS:-1}"

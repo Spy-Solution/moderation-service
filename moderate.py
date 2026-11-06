@@ -28,6 +28,8 @@ nsfw_clf = None        # transformers pipeline
 ocr_engine = None      # RapidOCR
 _OCR_NEW = True
 wechat_detector = None # cv2 WeChat QR (optional)
+ocr_providers = None   # provider THỰC của các session OCR -> /health
+vram_budget = None     # trần VRAM đã áp cho process này -> /health
 
 import cv2  # opencv-contrib-python (cv2 base + wechat_qrcode)
 
@@ -40,40 +42,101 @@ def _make_ocr_gpu(RapidOCR):
     # conv + cấp workspace lớn cho TỪNG shape mới -> rất chậm với OCR (ảnh/dòng chữ nhiều cỡ).
     # KHÔNG ép arena_extend_strategy: mặc định kNextPowerOfTwo nhanh hơn, và đã có cap ảnh 1280
     # giới hạn tập shape nên arena tự ổn định, không còn phình vô hạn theo thời gian.
+    # rapidocr 3.x: option của CUDA EP nằm dưới cuda_ep_cfg. Key đặt sai chỗ (vd
+    # EngineConfig.onnxruntime.cudnn_conv_algo_search) bị NHẬN ÂM THẦM rồi bỏ qua -> trước đây
+    # HEURISTIC + gpu_mem_limit chưa từng có tác dụng (vẫn EXHAUSTIVE, arena không trần).
+    ep = "EngineConfig.onnxruntime.cuda_ep_cfg."
     tuned = {"EngineConfig.onnxruntime.use_cuda": True,
-             "EngineConfig.onnxruntime.gpu_id": 0,
-             "EngineConfig.onnxruntime.cudnn_conv_algo_search": "HEURISTIC"}
+             ep + "device_id": 0,
+             ep + "cudnn_conv_algo_search": "HEURISTIC"}
     mem = os.environ.get("OCR_GPU_MEM_LIMIT")            # bytes, optional (vd 2147483648 = 2GB)
     if mem:
-        tuned["EngineConfig.onnxruntime.gpu_mem_limit"] = int(mem)
+        tuned[ep + "gpu_mem_limit"] = int(mem)
     for params in (tuned,
-                   {"EngineConfig.onnxruntime.use_cuda": True, "EngineConfig.onnxruntime.gpu_id": 0},
+                   {"EngineConfig.onnxruntime.use_cuda": True},
                    {"Global.use_cuda": True}):
         try:
-            return RapidOCR(params=params)
-        except Exception:
-            pass
+            return _ocr_eager_load(RapidOCR(params=params))
+        except Exception as e:
+            print("[warn] OCR GPU params", list(params), "->", type(e).__name__, str(e)[:200],
+                  file=sys.stderr)
     try:
-        return RapidOCR(det_use_cuda=True, cls_use_cuda=True, rec_use_cuda=True)  # API cũ
+        return _ocr_eager_load(RapidOCR(det_use_cuda=True, cls_use_cuda=True, rec_use_cuda=True))  # API cũ
     except Exception:
         return None
 
 
-def _ocr_session_providers(engine):
-    """Soi provider THỰC mà từng session OCR (det/cls/rec) đang dùng. ort.get_available_providers()
-    chỉ liệt kê EP được CÀI, không phải EP đang chạy -> cần cái này để biết OCR có thật sự trên CUDA."""
-    out = {}
-    for attr in ("text_det", "text_cls", "text_rec"):
-        comp = getattr(engine, attr, None)
-        sess = getattr(comp, "session", None)
-        real = getattr(sess, "session", sess)                # rapidocr bọc 1-2 lớp quanh ORT session
-        gp = getattr(real, "get_providers", None)
-        if callable(gp):
+def _ocr_eager_load(engine):
+    """rapidocr 3.x tạo session LƯỜI (lần gọi đầu) -> option CUDA sai chỉ nổ ở request đầu tiên.
+    Nạp sẵn ngay đây: lỗi lộ ra trong chuỗi fallback, soi được provider, request đầu khỏi trễ.
+    Bản cũ (tạo session trong __init__) không có các hàm này -> bỏ qua."""
+    for fn in ("_load_det_model", "_load_cls_model", "_load_rec_model"):
+        f = getattr(engine, fn, None)
+        if f is not None:
+            f()
+    return engine
+
+
+def _ocr_session_providers(engine, max_depth=5):
+    """Soi provider THỰC của các InferenceSession bên trong RapidOCR. ort.get_available_providers()
+    chỉ liệt kê EP được CÀI, không phải EP đang chạy. Tên thuộc tính đổi theo version rapidocr
+    (text_det.session.session, ...) -> duyệt đồ thị object tìm mọi InferenceSession thay vì đoán."""
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return {}
+    out, seen = {}, set()
+    stack = [(engine, "ocr", 0)]
+    while stack:
+        obj, path, d = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, ort.InferenceSession):
             try:
-                out[attr] = gp()
+                out[path] = obj.get_providers()
             except Exception:
                 pass
+            continue
+        if d >= max_depth:
+            continue
+        if isinstance(obj, (list, tuple)):
+            kids = [(f"{path}[{i}]", v) for i, v in enumerate(obj)]
+        elif isinstance(obj, dict):
+            kids = [(f"{path}[{k!r}]", v) for k, v in obj.items()]
+        else:
+            kids = [(f"{path}.{k}", v) for k, v in getattr(obj, "__dict__", {}).items()]
+        for kp, v in kids:
+            if not isinstance(v, (str, bytes, int, float, bool, type(None), np.ndarray)):
+                stack.append((v, kp, d + 1))
     return out
+
+
+def _apply_vram_budget(log):
+    """Chia VRAM cho UVICORN_WORKERS process trên cùng 1 GPU. Không chia thì torch caching
+    allocator giữ cache, ORT arena nở theo lũy thừa 2 -> 3 worker giành nhau tới OOM/cuDNN error.
+    - torch (NSFW ViT): set_per_process_memory_fraction -> chạm trần thì torch tự nhả cache.
+    - ORT (OCR): gpu_mem_limit = phần còn lại của worker trừ CUDA context/cuDNN workspace.
+    OCR_GPU_MEM_LIMIT đặt tay thì giữ nguyên. VRAM_BUDGET=0 để tắt hẳn."""
+    global vram_budget
+    if os.environ.get("VRAM_BUDGET", "1") == "0":
+        return
+    import torch
+    gib = 2 ** 30
+    total = torch.cuda.get_device_properties(0).total_memory
+    workers = max(1, int(os.environ.get("UVICORN_WORKERS", "1")))
+    share = total * float(os.environ.get("VRAM_USABLE", "0.92")) / workers
+    torch_cap = min(float(os.environ.get("TORCH_VRAM_GB", "1.5")) * gib, share / 2)
+    torch.cuda.set_per_process_memory_fraction(torch_cap / total, 0)
+    if not os.environ.get("OCR_GPU_MEM_LIMIT"):
+        reserve = float(os.environ.get("CUDA_CTX_RESERVE_GB", "0.7")) * gib   # context + workspace ngoài arena
+        os.environ["OCR_GPU_MEM_LIMIT"] = str(int(max(gib, share - torch_cap - reserve)))
+    vram_budget = {"total_gb": round(total / gib, 2), "workers": workers,
+                   "per_worker_gb": round(share / gib, 2), "torch_gb": round(torch_cap / gib, 2),
+                   "ocr_gb": round(int(os.environ["OCR_GPU_MEM_LIMIT"]) / gib, 2)}
+    log("[ok] VRAM budget:", vram_budget)
+    if share < 3 * gib:
+        log(f"[WARN] mỗi worker chỉ ~{share / gib:.1f}GB VRAM -> dễ 503/OOM. Giảm UVICORN_WORKERS.")
 
 
 def _ocr_model_path(engine):
@@ -111,11 +174,14 @@ def _probe_cuda_ort(engine, log):
 
 
 def load_engines(use_gpu: bool = False, quiet: bool = False):
-    global nsfw_clf, ocr_engine, _OCR_NEW, wechat_detector
+    global nsfw_clf, ocr_engine, _OCR_NEW, wechat_detector, ocr_providers
 
     def log(*a):
         if not quiet:
             print(*a, file=sys.stderr)
+
+    if use_gpu:
+        _apply_vram_budget(log)      # TRƯỚC khi tạo session ORT (gpu_mem_limit đọc lúc tạo)
 
     # --- NSFW (binary sfw/nsfw). AdamCodd ít false-positive hơn nhiều so với LukeJacob2023
     # (vốn chấm cảnh review/sản phẩm thành porn=1.0). ---
@@ -136,9 +202,9 @@ def load_engines(use_gpu: bool = False, quiet: bool = False):
         from rapidocr import RapidOCR; _OCR_NEW = True
     except ImportError:
         from rapidocr_onnxruntime import RapidOCR; _OCR_NEW = False
-    ocr_engine = (_make_ocr_gpu(RapidOCR) if use_gpu else None) or RapidOCR()
+    ocr_engine = (_make_ocr_gpu(RapidOCR) if use_gpu else None) or _ocr_eager_load(RapidOCR())
     # Log provider THỰC của từng session -> biết ngay OCR chạy CUDA hay rớt CPU (nguồn chậm ~10s).
-    sess_prov = _ocr_session_providers(ocr_engine)
+    sess_prov = ocr_providers = _ocr_session_providers(ocr_engine)
     log("[ok] OCR: RapidOCR", "(new)" if _OCR_NEW else "(old)",
         "| session providers:", sess_prov or "(không soi được)")
     if use_gpu and sess_prov and not any("CUDA" in str(p) for p in sess_prov.values()):

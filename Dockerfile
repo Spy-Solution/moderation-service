@@ -26,11 +26,12 @@ WORKDIR /app
 # để tránh 2 bản cv2 đụng nhau.
 # onnxruntime-gpu PIN: bản mới nhất build cho CUDA 13 (libcudart.so.13) -> vỡ với base
 # CUDA 12.4 (chỉ có libcudart.so.12). 1.20.2 build cho CUDA 12.x + cuDNN 9, khớp base.
-# (1.20.1 đã bị gỡ khỏi PyPI.) KHÔNG nối "|| true" vào chuỗi && -> nó nuốt lỗi pip, CI vẫn xanh
+# (1.20.1 đã bị gỡ khỏi PyPI.) rapidocr PIN: key cấu hình CUDA EP (cuda_ep_cfg.*) đổi theo version.
+# KHÔNG nối "|| true" vào chuỗi && -> nó nuốt lỗi pip, CI vẫn xanh
 # mà image thiếu hết deps. Bọc riêng lệnh được phép lỗi trong ( ... || true).
 RUN pip install --no-cache-dir \
         "transformers==4.46.3" accelerate "pillow<12" numpy requests \
-        pyzbar rapidocr "onnxruntime-gpu==1.20.2" \
+        pyzbar "rapidocr==3.10.0" "onnxruntime-gpu==1.20.2" \
         fastapi "uvicorn[standard]" python-multipart \
     && (pip uninstall -y opencv-python opencv-python-headless || true) \
     && pip install --no-cache-dir opencv-contrib-python \

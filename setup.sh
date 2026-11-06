@@ -7,7 +7,7 @@ sudo apt-get update && sudo apt-get install -y libzbar0 libgl1 libglib2.0-0
 # driver CUDA 12.4 tối đa là 2.6 (kênh cu124). NSFW ViT không cần transformers mới.
 # onnxruntime-gpu PIN 1.20.2 (1.20.1 đã bị gỡ khỏi PyPI): bản mới build cho CUDA 13 (libcudart.so.13), vỡ với CUDA 12.4.
 pip install "transformers==4.46.3" accelerate "pillow<12" numpy requests \
-    pyzbar opencv-contrib-python rapidocr "onnxruntime-gpu==1.20.2" \
+    pyzbar opencv-contrib-python "rapidocr==3.10.0" "onnxruntime-gpu==1.20.2" \
     fastapi "uvicorn[standard]" python-multipart
 
 # Box hay có sẵn torch CUDA quá mới so với driver (vd CUDA13 vs driver 12.4) -> không thấy GPU.

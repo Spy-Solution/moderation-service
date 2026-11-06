@@ -152,6 +152,8 @@ Số đo thực tế (64 ảnh, workload trộn):
 - `MAX_OCR_SIDE` (mặc định 1280): cap max-side ảnh đẩy vào OCR, cắt đỉnh VRAM. 0 = tắt cap.
 - `EMPTY_CACHE_EVERY` (mặc định 200): mỗi N request gọi `torch.cuda.empty_cache()` chống phân mảnh. 0 = tắt.
 - `OCR_GPU_MEM_LIMIT` (bytes, optional): trần VRAM cho OCR onnxruntime, vd `2147483648` = 2GB.
-- `UVICORN_WORKERS` (mặc định 1): số process uvicorn. Mỗi process load model riêng (~1–1.5GB VRAM) và có semaphore `GPU_CONCURRENCY` riêng → tăng khi CPU còn rảnh mà GIL nghẽn.
+- `UVICORN_WORKERS` (mặc định 1): số process uvicorn. Mỗi process load model riêng và có semaphore `GPU_CONCURRENCY` riêng → tăng khi CPU còn rảnh mà GIL nghẽn. Khuyến nghị: GPU 16GB → **2** worker (3 worker từng OOM ở ≥36 request batch đồng thời); 24GB → 3.
+- VRAM tự chia theo worker (`VRAM_BUDGET=1` mặc định): mỗi worker được `VRAM_USABLE`(0.92) × VRAM / `UVICORN_WORKERS`; torch (NSFW) trần `TORCH_VRAM_GB` (1.5), OCR onnxruntime nhận phần còn lại trừ `CUDA_CTX_RESERVE_GB` (0.7) làm `gpu_mem_limit` (trừ khi đặt `OCR_GPU_MEM_LIMIT`). Xem `GET /health` → `vram_budget`, `ocr_providers` (phải chứa `CUDAExecutionProvider`).
+- Hết VRAM giữa chừng → **503 + `Retry-After: 1`** (lỗi tạm, client nên retry), không còn 500.
 - `BATCH_MAX_FILES` (mặc định 16): số frame tối đa / request `/moderate/batch`.
 - `QR_THREADS` (mặc định min(8, số CPU)): pool quét QR song song trong 1 batch.
