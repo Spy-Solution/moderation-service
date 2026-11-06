@@ -9,9 +9,9 @@ Endpoints:
 Chạy: uvicorn app:app --host 0.0.0.0 --port 8000
 Device: env DEVICE = gpu|cpu|auto (mặc định auto).
 """
-import io, os, threading, time, collections
+import io, os, threading, time, collections, contextvars, itertools
 from typing import List
-from fastapi import FastAPI, Request, Response, UploadFile, File, HTTPException
+from fastapi import FastAPI, Response, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from PIL import Image
 
@@ -22,14 +22,103 @@ _STATE = {"gpu": False, "ready": False}
 _BATCH_MAX = max(1, int(os.environ.get("BATCH_MAX_FILES", "16")))
 
 
-@app.middleware("http")
-async def _process_time(request: Request, call_next):
-    # Thời gian xử lý PHÍA SERVER (gồm cả xếp hàng chờ semaphore) -> client lấy latency đo được
-    # trừ đi số này = phần mạng/upload.
-    t0 = time.perf_counter()
-    resp = await call_next(request)
-    resp.headers["X-Process-Ms"] = str(round((time.perf_counter() - t0) * 1000))
-    return resp
+# --- Access log theo giai đoạn ---------------------------------------------------------
+# Mỗi request đi qua: upload (nhận body) -> parse (multipart) -> queue (chờ slot GPU) -> work
+# -> send. Ghi mốc thời gian từng giai đoạn để biết request chậm/treo nằm ở MẠNG hay trong APP.
+#   ACCESS_LOG=all  : log mọi request | slow (mặc định): chỉ request > SLOW_MS, lỗi, client ngắt
+#   ACCESS_LOG=off  : tắt. Watchdog luôn chạy: request còn dở > STUCK_LOG_S giây -> log [stuck].
+# Client gửi header X-Request-Id thì log dùng id đó -> đối chiếu được request client bị timeout.
+_ACCESS_LOG = os.environ.get("ACCESS_LOG", "slow").lower()
+_SLOW_MS = float(os.environ.get("SLOW_MS", "5000"))
+_STUCK_S = float(os.environ.get("STUCK_LOG_S", "60"))
+_REQ_INFO = contextvars.ContextVar("req_info", default=None)   # thread của endpoint thấy qua copy_context
+_INFLIGHT = {}
+_INFLIGHT_LOCK = threading.Lock()
+_SEQ = itertools.count(1)
+
+
+def _mark(phase):
+    info = _REQ_INFO.get()
+    if info is not None:
+        info["phase"] = phase
+        info["t_" + phase] = time.perf_counter()
+
+
+def _req_line(info, now, tag):
+    t0 = info["t0"]
+    def ms(k):
+        v = info.get(k)
+        return "-" if v is None else str(round((v - t0) * 1000))
+    return (f"[{tag}] id={info['id']} {info['method']} {info['path']} status={info.get('status')} "
+            f"phase={info['phase']} clen={info.get('clen')} client={info['client']} "
+            f"body_done={ms('t_parse')} enter_queue={ms('t_queue')} start_work={ms('t_work')} "
+            f"resp_start={ms('t_send')} total={round((now - t0) * 1000)}ms"
+            + (" CLIENT_DISCONNECTED" if info.get("disconnect") else ""))
+
+
+class _AccessTiming:
+    """Middleware ASGI thuần (không dùng BaseHTTPMiddleware): bọc receive/send để lấy đúng mốc
+    nhận xong body / bắt đầu trả response, thêm header X-Process-Ms + X-Request-Id."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        t0 = time.perf_counter()
+        hdr = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        cl = scope.get("client") or ("?", "?")
+        info = {"id": hdr.get("x-request-id") or f"s{next(_SEQ)}", "method": scope.get("method"),
+                "path": scope.get("path"), "clen": hdr.get("content-length"),
+                "client": f"{cl[0]}:{cl[1]}", "t0": t0, "phase": "upload"}
+        _REQ_INFO.set(info)
+        with _INFLIGHT_LOCK:
+            _INFLIGHT[id(info)] = info
+
+        async def rcv():
+            m = await receive()
+            if m["type"] == "http.request" and not m.get("more_body", False) and "t_parse" not in info:
+                _mark("parse")
+            elif m["type"] == "http.disconnect":
+                info["disconnect"] = True
+            return m
+
+        async def snd(m):
+            if m["type"] == "http.response.start":
+                info["status"] = m["status"]
+                _mark("send")
+                m = dict(m)
+                m["headers"] = list(m.get("headers", [])) + [
+                    (b"x-process-ms", str(round((time.perf_counter() - t0) * 1000)).encode()),
+                    (b"x-request-id", info["id"].encode("latin1", "replace"))]
+            await send(m)
+
+        try:
+            await self.app(scope, rcv, snd)
+        finally:
+            with _INFLIGHT_LOCK:
+                _INFLIGHT.pop(id(info), None)
+            now = time.perf_counter()
+            slow = (now - t0) * 1000 >= _SLOW_MS or (info.get("status") or 500) >= 400 or info.get("disconnect")
+            if _ACCESS_LOG == "all" or (_ACCESS_LOG == "slow" and slow):
+                print(_req_line(info, now, "req"), flush=True)
+
+
+app.add_middleware(_AccessTiming)
+
+
+def _stuck_watchdog():
+    while True:
+        time.sleep(min(15.0, _STUCK_S))
+        now = time.perf_counter()
+        with _INFLIGHT_LOCK:
+            items = list(_INFLIGHT.values())
+        for info in items:
+            if now - info["t0"] >= _STUCK_S and now - info.get("stuck_logged", 0) >= _STUCK_S:
+                info["stuck_logged"] = now
+                print(_req_line(info, now, "stuck"), flush=True)
+
 
 # --- Trần concurrency GPU phía server -------------------------------------------------
 # Endpoint là sync def -> Starlette chạy trong threadpool (~40 thread). Nếu 1 client bắn
@@ -110,6 +199,7 @@ async def _threadpool_size():
 
 @app.on_event("startup")
 def _startup():
+    threading.Thread(target=_stuck_watchdog, daemon=True, name="stuck-watchdog").start()
     want = os.environ.get("DEVICE", "auto").lower()
     cuda = False
     try:
@@ -132,6 +222,8 @@ def health():
             "gpu_concurrency": _GPU_LIMIT, "batch_max_files": _BATCH_MAX,
             "gpu_busy": _GPU_SLOTS.busy, "queue_waiting": _GPU_SLOTS.waiting,
             "queue_timeout_s": _QUEUE_TIMEOUT, "cpu_threads": M.cpu_threads,
+            "inflight": len(_INFLIGHT),
+            "inflight_oldest_s": round(max([time.perf_counter() - i["t0"] for i in list(_INFLIGHT.values())] or [0]), 1),
             "ocr_providers": M.ocr_providers, "vram_budget": M.vram_budget}
 
 
@@ -143,12 +235,14 @@ _OOM_MARKERS = ("out of memory", "outofmemory", "failed to allocate", "cudnn_sta
 
 def _run_gpu(response, fn, *args):
     t0 = time.perf_counter()
+    _mark("queue")
     if not _GPU_SLOTS.acquire(_QUEUE_TIMEOUT):       # ghìm số inference GPU chạy cùng lúc
         raise HTTPException(status_code=503, headers={"Retry-After": "2"},
                             detail=f"Hàng đợi GPU quá {_QUEUE_TIMEOUT:.0f}s "
                                    f"({_GPU_SLOTS.waiting} request đang chờ), thử lại sau")
     # Thời gian chờ slot: X-Process-Ms − X-Queue-Ms ≈ thời gian xử lý thật.
     response.headers["X-Queue-Ms"] = str(round((time.perf_counter() - t0) * 1000))
+    _mark("work")
     try:
         return fn(*args)
     except Exception as e:
